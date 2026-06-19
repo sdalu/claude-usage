@@ -19,6 +19,9 @@ const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const PROFILE_URL: &str = "https://api.anthropic.com/api/oauth/profile";
 const OAUTH_BETA: &str = "oauth-2025-04-20";
 
+/// Shown on HTTP 429. Kept under 70 characters so it fits a narrow window.
+const RATE_LIMITED: &str = "Rate limited by the usage API \u{2014} wait a moment and retry.";
+
 /// One usage window: how much of an allowance is used and when it resets.
 /// `used_dollars`/`limit_dollars` are populated only on credit-based plans.
 #[derive(Debug, Clone)]
@@ -121,7 +124,9 @@ fn http_get(url: &str, token: &str) -> Result<String, String> {
         .set("User-Agent", "claude-usage-rs");
     match request.call() {
         Ok(response) => response.into_string().map_err(|e| e.to_string()),
-        // Surface the API's own message (e.g. rate-limit) on a non-2xx status.
+        // Rate limiting is common enough to warrant a friendly message.
+        Err(ureq::Error::Status(429, _)) => Err(RATE_LIMITED.to_string()),
+        // Otherwise surface the API's own message on a non-2xx status.
         Err(ureq::Error::Status(code, response)) => {
             let body = response.into_string().unwrap_or_default();
             Err(match error_message(&body) {
@@ -299,6 +304,11 @@ fn humanize(kind: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rate_limit_message_fits() {
+        assert!(RATE_LIMITED.chars().count() < 70);
+    }
 
     const SAMPLE: &str = r#"{
         "limits": [
