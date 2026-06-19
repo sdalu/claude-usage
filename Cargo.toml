@@ -1,0 +1,19 @@
+[package]
+name = "claude-usage"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.74"
+description = "Live terminal monitor for Claude plan usage limits"
+license = "MIT"
+
+[[bin]]
+name = "claude-usage"
+path = "src/main.rs"
+
+[dependencies]
+chrono = "0.4"
+serde_json = "1"
+dirs = "5"
+ratatui = "0.29"
+crossterm = "0.28"
+ureq = "2"
