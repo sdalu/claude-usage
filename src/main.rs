@@ -20,6 +20,7 @@ fetched from https://api.anthropic.com/api/oauth/usage using the OAuth token in
 
 Options:
   -1           render the dashboard once and exit (no live updates)
+  --no-border  with -1, drop the box border (just the gauge rows)
   --json       print the usage windows as JSON and exit (no UI)
   -h, --help   show this help
 
@@ -40,10 +41,12 @@ fn real_main() -> i32 {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut json_mode = false;
     let mut oneshot = false;
+    let mut no_border = false;
     for arg in &args {
         match arg.as_str() {
             "--json" => json_mode = true,
             "-1" => oneshot = true,
+            "--no-border" => no_border = true,
             "-h" | "--help" => {
                 println!("{USAGE}");
                 return 0;
@@ -54,6 +57,12 @@ fn real_main() -> i32 {
                 return 1;
             }
         }
+    }
+
+    if no_border && !oneshot {
+        eprintln!("claude-usage: --no-border is only valid with -1");
+        eprintln!("{USAGE}");
+        return 1;
     }
 
     let status = usage_api::fetch();
@@ -77,7 +86,11 @@ fn real_main() -> i32 {
 
     // Single-shot: render one frame inline and quit (no "?" flash, no input).
     if oneshot {
-        return match tui::App::new(status, plan).without_intro().render_once() {
+        let mut app = tui::App::new(status, plan).without_intro();
+        if no_border {
+            app = app.without_border();
+        }
+        return match app.render_once() {
             Ok(()) => 0,
             Err(e) => {
                 eprintln!("claude-usage: {e}");

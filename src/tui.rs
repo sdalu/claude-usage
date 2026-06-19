@@ -31,6 +31,7 @@ pub struct App {
     show_help: bool,
     show_updated: bool,
     show_intro: bool,
+    border: bool,
     started: Instant,
     intro_was_active: bool,
 }
@@ -45,6 +46,7 @@ impl App {
             show_help: false,
             show_updated: false,
             show_intro: true,
+            border: true,
             started: Instant::now(),
             intro_was_active: false,
         }
@@ -53,6 +55,13 @@ impl App {
     /// Disables the startup "?" flash (used by single-shot rendering).
     pub fn without_intro(mut self) -> Self {
         self.show_intro = false;
+        self
+    }
+
+    /// Drops the surrounding box (and the title/banner it carries); only the
+    /// gauge rows are rendered. Intended for single-shot output.
+    pub fn without_border(mut self) -> Self {
+        self.border = false;
         self
     }
 
@@ -70,7 +79,12 @@ impl App {
     }
 
     fn box_height(&self) -> u16 {
-        self.views.windows.len().max(1) as u16 + 2
+        let rows = self.views.windows.len().max(1) as u16;
+        if self.border {
+            rows + 2
+        } else {
+            rows
+        }
     }
 
     pub fn run(mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
@@ -189,7 +203,9 @@ impl App {
         }
     }
 
-    fn draw_windows(&self, f: &mut Frame, area: Rect) {
+    /// Draws the surrounding box with its title, optional updated banner and
+    /// startup "?" hint, and returns the inner content area.
+    fn draw_box(&self, f: &mut Frame, area: Rect) -> Rect {
         let title = match &self.plan {
             Some(plan) => format!(" Claude usage limits \u{b7} {plan} "),
             None => " Claude usage limits ".to_string(),
@@ -224,6 +240,20 @@ impl App {
         }
         let inner = block.inner(area);
         f.render_widget(block, area);
+        inner
+    }
+
+    fn draw_windows(&self, f: &mut Frame, area: Rect) {
+        // Borderless mode (single-shot): just the gauge rows, no box/title/banner.
+        // No left margin (the rows lose their lead space), one space on the right.
+        let inner = if self.border {
+            self.draw_box(f, area)
+        } else {
+            Rect {
+                width: area.width.saturating_sub(1),
+                ..area
+            }
+        };
 
         if self.views.windows.is_empty() {
             let msg = self
@@ -270,7 +300,9 @@ impl App {
         .split(inner);
 
         for (gauge, row) in self.views.windows.iter().zip(rows.iter()) {
-            render_gauge_row(f, *row, gauge, name_width, text_width, drop_resets, drop_used);
+            render_gauge_row(
+                f, *row, gauge, name_width, text_width, drop_resets, drop_used, self.border,
+            );
         }
     }
 
@@ -369,6 +401,7 @@ fn name_columns(gauge: &GaugeView) -> usize {
     gauge.name.chars().count() + if gauge.active { 2 } else { 0 }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_gauge_row(
     f: &mut Frame,
     area: Rect,
@@ -377,6 +410,7 @@ fn render_gauge_row(
     text_width: u16,
     drop_resets: bool,
     drop_used: bool,
+    lead_space: bool,
 ) {
     let cols = Layout::horizontal([
         Constraint::Length(name_width + 1),
@@ -387,11 +421,13 @@ fn render_gauge_row(
 
     let color = severity_color(&gauge.severity, gauge.ratio);
 
-    // Window name; the binding (active) window is marked and brightened.
+    // Window name; the binding (active) window is marked and brightened. The
+    // lead space is the inner-left margin in bordered mode; dropped otherwise.
+    let lead = if lead_space { " " } else { "" };
     let name = if gauge.active {
-        format!(" {} \u{25c0}", gauge.name)
+        format!("{lead}{} \u{25c0}", gauge.name)
     } else {
-        format!(" {}", gauge.name)
+        format!("{lead}{}", gauge.name)
     };
     let name_style = if gauge.active {
         Style::new().fg(Color::White).bold()
@@ -548,6 +584,21 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(width, 6)).unwrap();
         terminal.draw(|f| app.draw(f)).unwrap();
         format!("{}", terminal.backend())
+    }
+
+    #[test]
+    fn borderless_has_no_box_and_no_left_margin() {
+        let mut app = App::new(usage_api::parse(SAMPLE), Some("Max 5x".into()))
+            .without_intro()
+            .without_border();
+        let mut terminal = Terminal::new(TestBackend::new(74, app.box_height())).unwrap();
+        terminal.draw(|f| app.draw(f)).unwrap();
+
+        let buf = terminal.backend().buffer();
+        let width = buf.area().width;
+        let first: String = (0..width).map(|x| buf[(x, 0)].symbol()).collect();
+        // No top border, and the first row starts at column 0 (lead space gone).
+        assert!(first.starts_with("Session (5h)"));
     }
 
     #[test]

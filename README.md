@@ -60,14 +60,18 @@ reports no dollars, so they are omitted. Regenerate this capture with
 Requires a Rust toolchain (1.74+). Install via <https://rustup.rs> if needed.
 
 ```sh
-cargo run --release           # launch the monitor
-cargo run --release -- -1     # render once (coloured) and quit, no live updates
-cargo run --release -- --json # print the windows as JSON, then exit
-cargo test                    # run the unit tests
+cargo run --release                  # launch the monitor
+cargo run --release -- -1            # render once (coloured) and quit
+cargo run --release -- -1 --no-border # render once without the box border
+cargo run --release -- --json        # print the windows as JSON, then exit
+cargo test                           # run the unit tests
 ```
 
 `-1` is single-shot: it prints one coloured frame inline (no startup `?` flash,
-no input loop) and exits, leaving the dashboard in your terminal.
+no input loop) and exits, leaving the dashboard in your terminal. Add
+`--no-border` (only valid with `-1`) to drop the surrounding box — just the
+gauge rows, with no left margin and a single trailing space — handy for
+embedding the output.
 
 Install it onto your PATH:
 
