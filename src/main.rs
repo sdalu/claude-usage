@@ -7,12 +7,13 @@
 //! logs or any other CLI byproduct.
 
 mod json;
+mod rotation;
 mod tui;
 mod usage_api;
 mod views;
 
 const USAGE: &str = "\
-Usage: claude-usage [-1] [--json] [--help]
+Usage: claude-usage [-1 [--no-border]] [--json] [--write-back] [--check-rotation] [--help]
 
 A live monitor of your Claude plan usage windows (percent of allowance used),
 fetched from https://api.anthropic.com/api/oauth/usage using the OAuth token in
@@ -22,6 +23,13 @@ Options:
   -1           render the dashboard once and exit (no live updates)
   --no-border  with -1, drop the box border (just the gauge rows)
   --json       print the usage windows as JSON and exit (no UI)
+  --write-back refresh an expired OAuth token and write the rotated
+               credentials back to ~/.claude/.credentials.json. Default
+               is read-only: an expired token is reported, never rewritten.
+  --check-rotation
+               passively check whether the OAuth refresh token rotates
+               (read-only; no network). Run once to baseline, then again
+               after Claude Code refreshes.
   -h, --help   show this help
 
 Keys (interactive UI):
@@ -47,6 +55,9 @@ fn real_main() -> i32 {
             "--json" => json_mode = true,
             "-1" => oneshot = true,
             "--no-border" => no_border = true,
+            "--write-back" => usage_api::set_write_back(true),
+            // Standalone diagnostic: runs and exits, ignoring the other flags.
+            "--check-rotation" => return rotation::run(),
             "-h" | "--help" => {
                 println!("{USAGE}");
                 return 0;

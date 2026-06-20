@@ -6,21 +6,57 @@
 //! logs (or any other CLI byproduct) — only the OAuth token from the
 //! credentials file, which is required to authenticate the request.
 //!
+//! By default the credentials file is treated as **read-only**: if the access
+//! token has expired the tool simply reports so, never touching the file, so it
+//! can never race Claude Code over a rotated refresh token. Opting in with
+//! [`set_write_back`] makes an expired token be refreshed through the OAuth
+//! token endpoint and the rotated credentials written back, mirroring Claude
+//! Code, so the monitor keeps working even when the CLI isn't running.
+//!
 //! The response's `limits` array lists every active window (the 5-hour session,
 //! the weekly all-models window, and any per-model weekly windows) with a
 //! `percent`, `severity`, `resets_at`, and optional model `scope`.
 
+use std::path::PathBuf;
 use std::time::Duration;
 
-use chrono::{DateTime, Local};
-use serde_json::Value;
+use chrono::{DateTime, Local, Utc};
+use serde_json::{json, Value};
 
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const PROFILE_URL: &str = "https://api.anthropic.com/api/oauth/profile";
 const OAUTH_BETA: &str = "oauth-2025-04-20";
 
+/// Endpoint and client id Claude Code uses to exchange a refresh token for a
+/// fresh access token. The client id is the public Claude Code OAuth client.
+const OAUTH_TOKEN_URL: &str = "https://console.anthropic.com/v1/oauth/token";
+const OAUTH_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+
+/// Refresh this many milliseconds before the stated expiry, so a token that
+/// would lapse mid-request is renewed first.
+const EXPIRY_SKEW_MS: i64 = 60_000;
+
 /// Shown on HTTP 429. Kept under 70 characters so it fits a narrow window.
 const RATE_LIMITED: &str = "Rate limited by the usage API \u{2014} wait a moment and retry.";
+
+/// Shown when the access token has expired and write-back is off (the default).
+/// Kept under 70 characters so it fits a narrow window.
+const TOKEN_EXPIRED: &str =
+    "Access token expired \u{2014} run Claude Code, or pass --write-back.";
+
+/// When true, an expired access token is refreshed and the rotated credentials
+/// written back to the file. Off by default so the tool never modifies the
+/// credentials Claude Code owns; `--write-back` opts in. Set once at startup.
+static WRITE_BACK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Enables refresh-and-persist of an expired OAuth token. See [`WRITE_BACK`].
+pub fn set_write_back(enabled: bool) {
+    WRITE_BACK.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn write_back_enabled() -> bool {
+    WRITE_BACK.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 /// One usage window: how much of an allowance is used and when it resets.
 /// `used_dollars`/`limit_dollars` are populated only on credit-based plans.
@@ -98,17 +134,157 @@ fn title_or_multiplier(word: &str) -> String {
     }
 }
 
-fn read_token() -> Result<String, String> {
-    let path = dirs::home_dir()
+pub(crate) fn credentials_path() -> Result<PathBuf, String> {
+    Ok(dirs::home_dir()
         .ok_or("no home directory")?
-        .join(".claude/.credentials.json");
+        .join(".claude/.credentials.json"))
+}
+
+/// Returns a usable OAuth access token. When the stored token has expired the
+/// behaviour depends on the write-back toggle: off (the default) it reports the
+/// expiry and leaves the file untouched; on, it refreshes through the OAuth
+/// token endpoint and persists the rotated credentials, falling back to the
+/// stored token if the refresh itself fails.
+fn read_token() -> Result<String, String> {
+    let path = credentials_path()?;
     let text = std::fs::read_to_string(&path)
         .map_err(|e| format!("reading {}: {e}", path.display()))?;
-    let json: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
-    json["claudeAiOauth"]["accessToken"]
-        .as_str()
-        .map(String::from)
-        .ok_or_else(|| "no OAuth access token in credentials".to_string())
+    let mut json: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+
+    let oauth = json
+        .get("claudeAiOauth")
+        .ok_or("no claudeAiOauth in credentials")?;
+    let access = oauth
+        .get("accessToken")
+        .and_then(Value::as_str)
+        .ok_or("no OAuth access token in credentials")?
+        .to_string();
+    let expires_at = oauth.get("expiresAt").and_then(Value::as_i64);
+
+    if !is_expired(expires_at, Utc::now().timestamp_millis()) {
+        return Ok(access);
+    }
+
+    // Expired. Read-only by default: refuse rather than modify the file Claude
+    // Code owns, so the two can never race over a rotated refresh token.
+    if !write_back_enabled() {
+        return Err(TOKEN_EXPIRED.to_string());
+    }
+
+    let refresh = oauth.get("refreshToken").and_then(Value::as_str);
+    match refresh.map(refresh_token) {
+        Some(Ok(refreshed)) => {
+            apply_refresh(&mut json, &refreshed);
+            // Persist best-effort: even if the write fails we still hold a
+            // valid access token for this run.
+            let _ = write_credentials(&path, &json);
+            Ok(refreshed.access)
+        }
+        // No refresh token, or the refresh failed: fall back to the stored
+        // token and let the request report the real error.
+        _ => Ok(access),
+    }
+}
+
+/// A token is expired when its expiry (minus a safety skew) is at or before
+/// now. A missing expiry is treated as "not expired" — we have nothing to act
+/// on, so the stored token is used as-is.
+fn is_expired(expires_at: Option<i64>, now_ms: i64) -> bool {
+    match expires_at {
+        Some(expiry) => expiry - EXPIRY_SKEW_MS <= now_ms,
+        None => false,
+    }
+}
+
+struct RefreshedTokens {
+    access: String,
+    refresh: String,
+    expires_at: i64,
+}
+
+/// Exchanges a refresh token for a fresh access token via the OAuth token
+/// endpoint. Anthropic rotates refresh tokens, so the response's refresh token
+/// must replace the stored one.
+fn refresh_token(refresh: &str) -> Result<RefreshedTokens, String> {
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(5))
+        .timeout_read(Duration::from_secs(10))
+        .build();
+    let body = json!({
+        "grant_type": "refresh_token",
+        "refresh_token": refresh,
+        "client_id": OAUTH_CLIENT_ID,
+    });
+    let response = match agent
+        .post(OAUTH_TOKEN_URL)
+        .set("Content-Type", "application/json")
+        .set("User-Agent", "claude-usage-rs")
+        .send_json(body)
+    {
+        Ok(response) => response,
+        Err(ureq::Error::Status(code, response)) => {
+            let body = response.into_string().unwrap_or_default();
+            return Err(match error_message(&body) {
+                Some(msg) => format!("token refresh HTTP {code}: {msg}"),
+                None => format!("token refresh HTTP {code}"),
+            });
+        }
+        Err(e) => return Err(e.to_string()),
+    };
+    let text = response.into_string().map_err(|e| e.to_string())?;
+    parse_refresh(&text)
+}
+
+/// Parses the OAuth token response, computing the absolute expiry (ms epoch)
+/// from the relative `expires_in` (seconds).
+fn parse_refresh(body: &str) -> Result<RefreshedTokens, String> {
+    let value: Value = serde_json::from_str(body).map_err(|e| e.to_string())?;
+    let access = value
+        .get("access_token")
+        .and_then(Value::as_str)
+        .ok_or("token refresh response had no access_token")?
+        .to_string();
+    // A rotated refresh token is expected; fall back to reusing the old one if
+    // the response omits it.
+    let refresh = value
+        .get("refresh_token")
+        .and_then(Value::as_str)
+        .map(String::from);
+    let expires_in = value
+        .get("expires_in")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    Ok(RefreshedTokens {
+        access,
+        refresh: refresh.unwrap_or_default(),
+        expires_at: Utc::now().timestamp_millis() + expires_in * 1000,
+    })
+}
+
+/// Writes the rotated tokens into the parsed credentials document, preserving
+/// every other field Claude Code stores there.
+fn apply_refresh(json: &mut Value, refreshed: &RefreshedTokens) {
+    let oauth = &mut json["claudeAiOauth"];
+    oauth["accessToken"] = Value::String(refreshed.access.clone());
+    if !refreshed.refresh.is_empty() {
+        oauth["refreshToken"] = Value::String(refreshed.refresh.clone());
+    }
+    oauth["expiresAt"] = Value::from(refreshed.expires_at);
+}
+
+/// Persists the credentials atomically (write to a sibling temp file, then
+/// rename) with owner-only permissions, so a crash mid-write can't truncate the
+/// file Claude Code depends on.
+fn write_credentials(path: &std::path::Path, json: &Value) -> Result<(), String> {
+    let text = serde_json::to_string(json).map_err(|e| e.to_string())?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, text).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+    }
+    std::fs::rename(&tmp, path).map_err(|e| e.to_string())
 }
 
 fn http_get(url: &str, token: &str) -> Result<String, String> {
@@ -308,6 +484,7 @@ mod tests {
     #[test]
     fn rate_limit_message_fits() {
         assert!(RATE_LIMITED.chars().count() < 70);
+        assert!(TOKEN_EXPIRED.chars().count() < 70);
     }
 
     const SAMPLE: &str = r#"{
@@ -372,6 +549,77 @@ mod tests {
     fn disabled_spend_is_skipped() {
         let body = r#"{"limits": [], "spend": {"enabled": false}}"#;
         assert!(parse(body).unwrap().windows.is_empty());
+    }
+
+    #[test]
+    fn write_back_defaults_off() {
+        // Off unless explicitly enabled, so the credentials file is never
+        // touched by default. (Restores the flag to avoid leaking into other
+        // tests sharing the process.)
+        assert!(!write_back_enabled());
+        set_write_back(true);
+        assert!(write_back_enabled());
+        set_write_back(false);
+    }
+
+    #[test]
+    fn expiry_uses_skew() {
+        // Already past.
+        assert!(is_expired(Some(1_000), 2_000));
+        // Within the skew window counts as expired.
+        assert!(is_expired(Some(2_000 + EXPIRY_SKEW_MS), 2_000 + 1));
+        // Comfortably in the future is fine.
+        assert!(!is_expired(Some(2_000 + EXPIRY_SKEW_MS + 1), 2_000));
+        // Unknown expiry is treated as valid.
+        assert!(!is_expired(None, 2_000));
+    }
+
+    #[test]
+    fn parse_refresh_reads_tokens() {
+        let body = r#"{"access_token":"sk-new","refresh_token":"rt-new","expires_in":3600}"#;
+        let refreshed = parse_refresh(body).unwrap();
+        assert_eq!(refreshed.access, "sk-new");
+        assert_eq!(refreshed.refresh, "rt-new");
+        assert!(refreshed.expires_at > Utc::now().timestamp_millis());
+    }
+
+    #[test]
+    fn apply_refresh_preserves_other_fields() {
+        let mut creds = json!({
+            "claudeAiOauth": {
+                "accessToken": "old",
+                "refreshToken": "old-rt",
+                "expiresAt": 1,
+                "subscriptionType": "pro"
+            }
+        });
+        apply_refresh(
+            &mut creds,
+            &RefreshedTokens {
+                access: "new".into(),
+                refresh: "new-rt".into(),
+                expires_at: 999,
+            },
+        );
+        let oauth = &creds["claudeAiOauth"];
+        assert_eq!(oauth["accessToken"], json!("new"));
+        assert_eq!(oauth["refreshToken"], json!("new-rt"));
+        assert_eq!(oauth["expiresAt"], json!(999));
+        assert_eq!(oauth["subscriptionType"], json!("pro"));
+    }
+
+    #[test]
+    fn apply_refresh_keeps_old_refresh_when_absent() {
+        let mut creds = json!({"claudeAiOauth": {"refreshToken": "keep"}});
+        apply_refresh(
+            &mut creds,
+            &RefreshedTokens {
+                access: "new".into(),
+                refresh: String::new(),
+                expires_at: 5,
+            },
+        );
+        assert_eq!(creds["claudeAiOauth"]["refreshToken"], json!("keep"));
     }
 
     #[test]

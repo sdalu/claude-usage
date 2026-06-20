@@ -8,7 +8,11 @@ bars. These are the same numbers `claude /status` reports.
 The data comes entirely from Anthropic's usage API; the tool does **not** read
 the Claude CLI session logs or any other CLI byproduct. Its only local
 dependency is the OAuth token in `~/.claude/.credentials.json`, which is needed
-to authenticate the request.
+to authenticate the request. By default this file is treated as **read-only**:
+when the access token has expired the tool just reports it and waits for Claude
+Code to refresh it. Pass `--write-back` to let the tool refresh the token itself
+and write the rotated credentials back. See
+[Credential refresh](#credential-refresh) below.
 
 ## Screenshot
 
@@ -64,6 +68,8 @@ cargo run --release                  # launch the monitor
 cargo run --release -- -1            # render once (coloured) and quit
 cargo run --release -- -1 --no-border # render once without the box border
 cargo run --release -- --json        # print the windows as JSON, then exit
+cargo run --release -- --write-back  # also refresh an expired token in-place
+cargo run --release -- --check-rotation  # check if the refresh token rotates
 cargo test                           # run the unit tests
 ```
 
@@ -114,6 +120,54 @@ only re-hits the usage endpoint.
 
 Your token is sent only to Anthropic's own API.
 
+### Credential refresh
+
+The access token in `~/.claude/.credentials.json` is short-lived (8 hours). On
+each request the tool checks the stored `expiresAt`.
+
+**Default (read-only).** If the token has expired the tool reports
+`Access token expired — run Claude Code, or pass --write-back` and leaves the
+file untouched. It never modifies the credentials Claude Code owns, so the two
+can never race each other. In normal use this is invisible: as long as you have
+used Claude Code within the last 8 hours the token is still valid.
+
+**`--write-back` (opt-in).** With this flag an expired token is refreshed by
+exchanging the `refreshToken` via
+
+```
+POST https://console.anthropic.com/v1/oauth/token
+```
+
+(using Claude Code's public OAuth client id), and the rotated credentials are
+written back to the file atomically, preserving every other field — so the
+monitor keeps working even when the Claude CLI is not running to refresh the
+token. A refresh failure falls back to the stored token, so the underlying API
+error is still surfaced rather than a confusing local one.
+
+The one caveat with `--write-back`: the tool and Claude Code then both write the
+same file, so if Anthropic *rotates* the refresh token, a simultaneous refresh
+could be raced. Whether that rotation happens is account-specific — use
+`--check-rotation` (below) to find out before relying on `--write-back`.
+
+### `--check-rotation`
+
+A passive, **read-only** probe that answers one question: does Anthropic rotate
+the OAuth refresh token when it is refreshed? It never calls the network and
+never writes the credentials file. It stores a non-reversible fingerprint of the
+refresh token (the token itself is never written) under
+`~/.cache/claude-usage/rotation-check.json`.
+
+```sh
+claude-usage --check-rotation   # first run records a baseline
+# ... wait until Claude Code refreshes (around the access token's expiry) ...
+claude-usage --check-rotation   # reports the verdict
+```
+
+- *No rotation* — a refresh happened and the refresh token was unchanged, so the
+  credential write-back above cannot race Claude Code; it is safe.
+- *Rotation detected* — the refresh token changed, so the write-back can race
+  Claude Code; prefer treating the credentials as read-only.
+
 ### `--json`
 
 ```json
@@ -136,9 +190,10 @@ On a failed fetch the body is `{ "error": "..." }` and the exit code is non-zero
 
 ```
 src/
-├── main.rs        argument parsing + dispatch (UI vs --json)
-├── usage_api.rs   fetches & parses GET /api/oauth/usage
+├── main.rs        argument parsing + dispatch (UI vs --json vs --check-rotation)
+├── usage_api.rs   fetches & parses GET /api/oauth/usage; OAuth token refresh
 ├── views.rs       UsageStatus -> pre-formatted gauge rows
 ├── tui.rs         ratatui monitor (gauges, refresh, key handling)
+├── rotation.rs    --check-rotation: passive refresh-token rotation probe
 └── json.rs        JSON form of the usage windows
 ```
