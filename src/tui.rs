@@ -365,10 +365,11 @@ fn percent_text(percent: i64, drop_used: bool) -> String {
 }
 
 /// "resets <suffix>", or just "<suffix>" when `drop_resets`; empty if no reset.
+/// "not started" is a complete phrase, so it never takes the "resets " prefix.
 fn reset_text(reset: &str, drop_resets: bool) -> String {
     if reset.is_empty() {
         String::new()
-    } else if drop_resets {
+    } else if drop_resets || reset == crate::views::NOT_STARTED {
         reset.to_string()
     } else {
         format!("resets {reset}")

@@ -9,6 +9,11 @@ use crate::usage_api::{LimitWindow, UsageStatus};
 /// Beyond this, show the absolute reset time instead of a countdown.
 const ABSOLUTE_THRESHOLD: i64 = 2 * 86_400;
 
+/// Shown in the reset column for a limit window whose clock hasn't started yet
+/// — the API reports no `resets_at` until the window is first used. The TUI
+/// recognises this value and renders it without the usual "resets " prefix.
+pub const NOT_STARTED: &str = "not started";
+
 /// One usage window rendered as a progress bar. The text pieces are kept
 /// separate so the TUI can drop words (`resets`, then `used`) on narrow
 /// terminals; `reset` holds only the suffix (e.g. `in 1h 20m`, `Tue 06:00`).
@@ -49,10 +54,13 @@ fn gauge(window: &LimitWindow, now: DateTime<Local>) -> GaugeView {
         name: window.label.clone(),
         percent: window.percent.round() as i64,
         dollars: dollars(window),
-        reset: window
-            .resets_at
-            .map(|t| reset_label(t, now))
-            .unwrap_or_default(),
+        reset: match window.resets_at {
+            Some(t) => reset_label(t, now),
+            // The Spend window legitimately has no reset; everything else with
+            // no reset is a window that hasn't started yet.
+            None if window.group == "spend" => String::new(),
+            None => NOT_STARTED.to_string(),
+        },
         ratio: (window.percent / 100.0).clamp(0.0, 1.0),
         severity: window.severity.clone(),
         active: window.is_active,
@@ -120,5 +128,30 @@ mod tests {
         let label = reset_label(now + Duration::days(3), now);
         assert!(!label.starts_with("in "));
         assert!(label.contains(':'));
+    }
+
+    fn window(group: &str, resets_at: Option<DateTime<Local>>) -> LimitWindow {
+        LimitWindow {
+            label: "x".into(),
+            group: group.into(),
+            percent: 0.0,
+            severity: "normal".into(),
+            resets_at,
+            is_active: false,
+            used_dollars: None,
+            limit_dollars: None,
+        }
+    }
+
+    #[test]
+    fn unstarted_window_shows_not_started() {
+        let now = Local::now();
+        assert_eq!(gauge(&window("session", None), now).reset, NOT_STARTED);
+    }
+
+    #[test]
+    fn spend_window_has_no_reset_label() {
+        let now = Local::now();
+        assert_eq!(gauge(&window("spend", None), now).reset, "");
     }
 }
