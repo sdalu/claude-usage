@@ -142,7 +142,7 @@ impl App {
             KeyCode::Char('q') | KeyCode::Esc => return true,
             _ if ctrl_c => return true,
             KeyCode::Char('?') => self.show_help = true,
-            KeyCode::Char('r') => self.refresh(),
+            KeyCode::Char('r') | KeyCode::Enter => self.refresh(),
             KeyCode::Char('t') => self.toggle_interval(),
             KeyCode::Char('u') => self.show_updated = !self.show_updated,
             _ => {}
@@ -316,7 +316,7 @@ impl App {
         let lines = vec![
             key("q / Esc", "quit".to_string()),
             key("Ctrl-C", "quit".to_string()),
-            key("r", "refresh now".to_string()),
+            key("r / Enter", "refresh now".to_string()),
             key(
                 "t",
                 format!("toggle auto-refresh (now {})", self.interval_label()),

@@ -34,7 +34,7 @@ Options:
 
 Keys (interactive UI):
   q / Esc / Ctrl-C   quit
-  r                  refresh now
+  r / Enter          refresh now
   t                  toggle auto-refresh (5m / 1m)
   u                  toggle the updated banner
   ?                  toggle the key help overlay
