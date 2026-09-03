@@ -81,9 +81,15 @@ pub struct UsageStatus {
 /// Fetches the current usage windows, or an error string describing why it
 /// could not (no token, offline, rate limited, expired token, ...).
 pub fn fetch() -> Result<UsageStatus, String> {
+    parse(&fetch_raw()?)
+}
+
+/// The raw `/api/oauth/usage` response body. Kept separate from [`fetch`] so
+/// the shared cache can store exactly what the API said, and every reader
+/// parses it the same way.
+pub fn fetch_raw() -> Result<String, String> {
     let token = read_token()?;
-    let body = http_get(USAGE_URL, &token)?;
-    parse(&body)
+    http_get(USAGE_URL, &token)
 }
 
 /// Fetches the account's plan / rate-limit tier (e.g. "Max 5x") from the

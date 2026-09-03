@@ -67,6 +67,8 @@ Requires a Rust toolchain (1.74+). Install via <https://rustup.rs> if needed.
 cargo run --release                  # launch the monitor
 cargo run --release -- -1            # render once (coloured) and quit
 cargo run --release -- -1 --no-border # render once without the box border
+cargo run --release -- --polybar     # print one status-bar line, then exit
+cargo run --release -- --polybar --interval 300   # ... or a line every 5 min
 cargo run --release -- --json        # print the windows as JSON, then exit
 cargo run --release -- --write-back  # also refresh an expired token in-place
 cargo run --release -- --check-rotation  # check if the refresh token rotates
@@ -98,9 +100,135 @@ cargo install --path .
 The monitor also auto-refreshes on its own — every 5 minutes by default, or
 every minute after pressing `t`.
 
+## Polybar
+
+`--polybar` replaces the TUI with a single status-bar line — one compact
+segment per usage window, coloured by severity with polybar's own format tags.
+It prints that line once and exits, or, with `--interval`, keeps running and
+prints one every N seconds for a `tail = true` module (see
+[Tail vs. polybar's interval](#tail-vs-polybars-interval) — the better mode
+against a rate-limited API):
+
+```text
+%{F#50fa7b}5h 11%%{F-} · %{T2}%{F#50fa7b}wk 39%%{F-}%{T-} · %{F#f1fa8c}Sonnet 62%%{F-}
+```
+
+which renders as `5h 11% · wk 39% · Sonnet 62%`, the percentages green/yellow/red
+by the same severity rule as the gauges. Window names shrink to bar size: `5h`
+for the session, `wk` for the all-models week, the model name for a per-model
+week, `$` for spend. The **binding** window (the one you hit first — `◀` in the
+TUI) is set in polybar's second font slot, which is conventionally the bold
+face, so it stands out without extra width.
+
+```ini
+[module/claude]
+type = custom/script
+exec = claude-usage --polybar --interval 300
+tail = true
+```
+
+### Tail vs. polybar's interval
+
+`--interval N` is the preferred shape, and the snippet above uses it: one
+long-lived process prints a line every N seconds (minimum 30) for a
+`tail = true` module. The usage API is rate limited, and tail mode is what puts
+the cadence under the tool's control rather than polybar's:
+
+- a failed fetch **doubles** the wait — 300s, 600s, 1200s, … capped at 30
+  minutes — so a rate-limited endpoint is backed off instead of re-hit on a
+  fixed schedule, and the wait resets on the first success;
+- while refreshes fail, the **last good line stays on the bar** with a `⚠`
+  marker in the warning colour (`5h 11% · wk 39% ⚠`) rather than the module
+  turning into an error message;
+- no process re-exec and TLS handshake per tick.
+
+Dropping `--interval` (and `tail`) gives the plain one-shot module, where
+polybar's own `interval = 300` drives the refresh — simpler, but it re-fires on
+schedule whatever the API answered:
+
+```ini
+[module/claude]
+type = custom/script
+exec = claude-usage --polybar
+interval = 300
+```
+
+### Several instances share one fetch
+
+Polybar starts a bar — and so a module process — **per monitor**, so three
+monitors would mean three processes polling a rate-limited endpoint on the same
+schedule. They don't: every instance reads and writes
+`~/.cache/claude-usage/usage.json`, and one that finds no entry younger than its
+TTL takes a lock file, fetches, and publishes the result for the others. A
+monitor (`claude-usage` with no arguments) opened alongside the bars joins the
+same pool, so it costs no extra call either.
+
+The entry stores the raw API response plus the time it was fetched, so every
+reader parses it identically and reports the true age of the data rather than
+the moment it read it. Failures are published too — three processes re-trying a
+rate limit in parallel is precisely what the cache is there to prevent — and a
+lock left behind by a killed instance is broken after 30 seconds.
+
+| Mode                       | Cache TTL                                        |
+| -------------------------- | ------------------------------------------------ |
+| `--polybar --interval N`   | just under N (90%), so the other monitors ride on one fetch |
+| `--polybar` (one-shot)     | 240s, sized for the usual `interval = 300`        |
+| TUI auto-refresh           | just under its own 5m/1m interval                 |
+| TUI `r`, `-1`, `--json`    | none — fetches fresh, and publishes it for the others |
+
+`--cache-ttl N` overrides the TTL, and `--no-cache` opts out entirely (every
+instance then fetches for itself).
+
+The bold emphasis needs a bold `font-1` in the bar itself (the tag is `%{T2}`,
+one more than the config key):
+
+```ini
+[bar/main]
+font-0 = "JetBrainsMono Nerd Font:size=10;2"
+font-1 = "JetBrainsMono Nerd Font:style=Bold:size=10;2"
+```
+
+Options (all only valid with `--polybar`):
+
+| Option                   | Effect                                                     |
+| ------------------------ | ---------------------------------------------------------- |
+| `--interval N`           | tail mode: keep running, printing a line every N seconds (minimum 30), with backoff on failure |
+| `--colors OK,WARN,CRIT`  | severity colours (default `#50fa7b,#f1fa8c,#ff5555`); an empty entry keeps that default |
+| `--bold-font N`          | font slot for the binding window (default `2`); `0` leaves it unemphasised |
+| `--no-color`             | plain text, no format tags                                  |
+
+`--cache-ttl N` and `--no-cache` (above) are accepted in every mode, not just
+`--polybar`.
+
+One polybar gotcha if you theme the colours from your `[colors]` section:
+polybar substitutes a `${section.key}` reference only when it is the *whole*
+value, so an inline one in `exec` is passed through verbatim and the shell
+answers with `Bad substitution`. Put the call in a wrapper script that sources
+your palette instead:
+
+```sh
+#!/bin/sh
+. $(dirname -- "$0")/colors.sh
+exec ~/.cargo/bin/claude-usage --polybar --interval 300 \
+     --bold-font 5 --colors "$green,$yellow,$red"
+```
+
+Both `--opt V` and `--opt=V` are accepted. With `--no-color` (and
+`--bold-font 0`) the line is plain `5h 11% · wk 39% · Sonnet 62%`, which suits
+waybar, i3blocks, tmux or a shell prompt just as well.
+
+In one-shot mode a failed fetch becomes the line itself — `claude: Access token
+expired` in the critical colour, the message trimmed to its first clause so it
+stays bar-sized — and the exit status is still 0, so polybar keeps rendering the
+module rather than treating it as a broken script. In tail mode it shows as the
+stale marker instead, once anything has been fetched at all. Regenerate the
+example above with `cargo test polybar_line -- --nocapture`.
+
 ## How it works
 
-On start (and on every `r`) the tool issues:
+On start (and on every `r`) the tool issues — unless a sibling instance has
+already published a fresh enough result, see [Several instances share one
+fetch](#several-instances-share-one-fetch):
 
 ```
 GET https://api.anthropic.com/api/oauth/usage
@@ -194,6 +322,8 @@ src/
 ├── usage_api.rs   fetches & parses GET /api/oauth/usage; OAuth token refresh
 ├── views.rs       UsageStatus -> pre-formatted gauge rows
 ├── tui.rs         ratatui monitor (gauges, refresh, key handling)
+├── polybar.rs     --polybar: one-line status-bar rendering + the tail loop
+├── cache.rs       cross-process cache: one fetch serves every instance
 ├── rotation.rs    --check-rotation: passive refresh-token rotation probe
 └── json.rs        JSON form of the usage windows
 ```

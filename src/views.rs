@@ -14,6 +14,33 @@ const ABSOLUTE_THRESHOLD: i64 = 2 * 86_400;
 /// recognises this value and renders it without the usual "resets " prefix.
 pub const NOT_STARTED: &str = "not started";
 
+/// How close a window is to its limit, from the API's own `severity` with a
+/// ratio-based fallback. Shared by the TUI (bar colour) and the polybar line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Level {
+    Ok,
+    Warn,
+    Crit,
+}
+
+/// Honours the API's severity, falling back to thresholds on the fill ratio
+/// when severity is the default "normal".
+pub fn level(severity: &str, ratio: f64) -> Level {
+    match severity {
+        "warning" => Level::Warn,
+        "critical" | "exceeded" | "blocked" => Level::Crit,
+        _ => {
+            if ratio >= 0.8 {
+                Level::Crit
+            } else if ratio >= 0.5 {
+                Level::Warn
+            } else {
+                Level::Ok
+            }
+        }
+    }
+}
+
 /// One usage window rendered as a progress bar. The text pieces are kept
 /// separate so the TUI can drop words (`resets`, then `used`) on narrow
 /// terminals; `reset` holds only the suffix (e.g. `in 1h 20m`, `Tue 06:00`).

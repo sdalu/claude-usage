@@ -17,8 +17,8 @@ use ratatui::{
     DefaultTerminal, Frame, Terminal,
 };
 
-use crate::usage_api::{self, UsageStatus};
-use crate::views::{GaugeView, Views};
+use crate::usage_api::UsageStatus;
+use crate::views::{GaugeView, Level, Views};
 
 /// How long the "?" help marker flashes at startup before fading away.
 const INTRO_SECS: f64 = 3.0;
@@ -39,9 +39,11 @@ pub struct App {
 impl App {
     pub fn new(status: Result<UsageStatus, String>, plan: Option<String>) -> Self {
         App {
+            // Age the monitor from when the data was fetched — which, with a
+            // result shared by another instance, is not when we read it.
+            last_refresh: fetched_at(&status),
             views: crate::views::build(&status),
             plan,
-            last_refresh: Local::now(),
             auto_interval: chrono::Duration::minutes(5),
             show_help: false,
             show_updated: false,
@@ -117,7 +119,7 @@ impl App {
                 }
             }
             if Local::now() - self.last_refresh >= self.auto_interval {
-                self.refresh();
+                self.refresh(false);
                 needs_draw = true;
             }
         }
@@ -142,7 +144,7 @@ impl App {
             KeyCode::Char('q') | KeyCode::Esc => return true,
             _ if ctrl_c => return true,
             KeyCode::Char('?') => self.show_help = true,
-            KeyCode::Char('r') | KeyCode::Enter => self.refresh(),
+            KeyCode::Char('r') | KeyCode::Enter => self.refresh(true),
             KeyCode::Char('t') => self.toggle_interval(),
             KeyCode::Char('u') => self.show_updated = !self.show_updated,
             _ => {}
@@ -150,9 +152,23 @@ impl App {
         false
     }
 
-    fn refresh(&mut self) {
-        self.views = crate::views::build(&usage_api::fetch());
-        self.last_refresh = Local::now();
+    /// Re-reads the usage. The auto-refresh goes through the shared cache, so
+    /// a monitor running beside the polybar modules costs no extra API call;
+    /// an explicit `r` forces a real fetch (and publishes it to the others).
+    fn refresh(&mut self, force: bool) {
+        let ttl = if force {
+            Duration::ZERO
+        } else {
+            // Just under our own interval, so we reuse a sibling's fetch but
+            // still refresh on our own schedule when we are the only instance.
+            self.auto_interval
+                .to_std()
+                .unwrap_or(Duration::from_secs(300))
+                .mul_f64(0.9)
+        };
+        let status = crate::cache::fetch(ttl);
+        self.last_refresh = fetched_at(&status);
+        self.views = crate::views::build(&status);
     }
 
     fn toggle_interval(&mut self) {
@@ -336,6 +352,15 @@ impl App {
             Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" Keys ")),
             rect,
         );
+    }
+}
+
+/// When the shown data was fetched: the fetch time carried by a status (its
+/// own, or an older one published by another instance), or now on an error.
+fn fetched_at(status: &Result<UsageStatus, String>) -> DateTime<Local> {
+    match status {
+        Ok(s) => s.fetched_at,
+        Err(_) => Local::now(),
     }
 }
 
@@ -527,21 +552,12 @@ fn fg_code(color: Color) -> Option<String> {
     Some(code.to_string())
 }
 
-/// Bar colour: honour the API's severity, falling back to thresholds on the
-/// fill ratio when severity is the default "normal".
+/// Bar colour for a window's severity level (see [`crate::views::level`]).
 fn severity_color(severity: &str, ratio: f64) -> Color {
-    match severity {
-        "warning" => Color::Yellow,
-        "critical" | "exceeded" | "blocked" => Color::Red,
-        _ => {
-            if ratio >= 0.8 {
-                Color::Red
-            } else if ratio >= 0.5 {
-                Color::Yellow
-            } else {
-                Color::Green
-            }
-        }
+    match crate::views::level(severity, ratio) {
+        Level::Ok => Color::Green,
+        Level::Warn => Color::Yellow,
+        Level::Crit => Color::Red,
     }
 }
 
@@ -551,23 +567,32 @@ mod tests {
     use crate::usage_api;
     use ratatui::{backend::TestBackend, Terminal};
 
-    const SAMPLE: &str = r#"{
+    /// Sample response with reset times relative to now, so the rendered
+    /// countdowns ("in 37m") and absolute labels ("Tue 06:00") stay realistic
+    /// however long after it was written the tests run.
+    fn sample() -> String {
+        let session = (Local::now() + chrono::Duration::minutes(37)).to_rfc3339();
+        let week = (Local::now() + chrono::Duration::days(3)).to_rfc3339();
+        format!(
+            r#"{{
         "limits": [
-            {"kind":"session","group":"session","percent":11,"severity":"normal",
-             "resets_at":"2026-06-19T20:30:00+00:00","scope":null,"is_active":false},
-            {"kind":"weekly_all","group":"weekly","percent":39,"severity":"normal",
-             "resets_at":"2026-06-23T06:00:00+00:00","scope":null,"is_active":true},
-            {"kind":"weekly_scoped","group":"weekly","percent":62,"severity":"warning",
-             "resets_at":"2026-06-23T06:00:00+00:00",
-             "scope":{"model":{"display_name":"Sonnet"}},"is_active":false}
+            {{"kind":"session","group":"session","percent":11,"severity":"normal",
+             "resets_at":"{session}","scope":null,"is_active":false}},
+            {{"kind":"weekly_all","group":"weekly","percent":39,"severity":"normal",
+             "resets_at":"{week}","scope":null,"is_active":true}},
+            {{"kind":"weekly_scoped","group":"weekly","percent":62,"severity":"warning",
+             "resets_at":"{week}",
+             "scope":{{"model":{{"display_name":"Sonnet"}}}},"is_active":false}}
         ]
-    }"#;
+    }}"#
+        )
+    }
 
     /// Renders one frame of the monitor; also the source of the README
     /// screenshot (`cargo test render_monitor -- --nocapture`).
     #[test]
     fn render_monitor() {
-        let status = usage_api::parse(SAMPLE);
+        let status = usage_api::parse(&sample());
         let mut app = App::new(status, Some("Max 5x".to_string()));
 
         let backend = TestBackend::new(74, 6);
@@ -581,7 +606,7 @@ mod tests {
     }
 
     fn render_at(width: u16) -> String {
-        let mut app = App::new(usage_api::parse(SAMPLE), None);
+        let mut app = App::new(usage_api::parse(&sample()), None);
         let mut terminal = Terminal::new(TestBackend::new(width, 6)).unwrap();
         terminal.draw(|f| app.draw(f)).unwrap();
         format!("{}", terminal.backend())
@@ -589,7 +614,7 @@ mod tests {
 
     #[test]
     fn borderless_has_no_box_and_no_left_margin() {
-        let mut app = App::new(usage_api::parse(SAMPLE), Some("Max 5x".into()))
+        let mut app = App::new(usage_api::parse(&sample()), Some("Max 5x".into()))
             .without_intro()
             .without_border();
         let mut terminal = Terminal::new(TestBackend::new(74, app.box_height())).unwrap();
@@ -604,7 +629,7 @@ mod tests {
 
     #[test]
     fn help_overlay_lists_keys() {
-        let mut app = App::new(usage_api::parse(SAMPLE), None);
+        let mut app = App::new(usage_api::parse(&sample()), None);
         app.show_help = true;
         let mut terminal = Terminal::new(TestBackend::new(74, 14)).unwrap();
         terminal.draw(|f| app.draw(f)).unwrap();
@@ -616,7 +641,7 @@ mod tests {
 
     #[test]
     fn updated_banner_toggles() {
-        let mut app = App::new(usage_api::parse(SAMPLE), None);
+        let mut app = App::new(usage_api::parse(&sample()), None);
         let render = |app: &mut App| {
             let mut t = Terminal::new(TestBackend::new(74, 6)).unwrap();
             t.draw(|f| app.draw(f)).unwrap();
@@ -630,7 +655,7 @@ mod tests {
 
     #[test]
     fn without_intro_hides_the_marker() {
-        let mut app = App::new(usage_api::parse(SAMPLE), Some("Max 5x".into())).without_intro();
+        let mut app = App::new(usage_api::parse(&sample()), Some("Max 5x".into())).without_intro();
         assert!(app.intro_hint().is_none());
 
         let mut terminal = Terminal::new(TestBackend::new(74, 5)).unwrap();
@@ -642,7 +667,7 @@ mod tests {
 
     #[test]
     fn intro_marker_fades_after_timeout() {
-        let mut app = App::new(usage_api::parse(SAMPLE), None);
+        let mut app = App::new(usage_api::parse(&sample()), None);
         assert!(app.intro_active());
         assert!(app.intro_hint().is_some());
 
