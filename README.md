@@ -3,7 +3,10 @@
 A live terminal monitor for Claude plan usage limits. It shows how much of each
 usage window — the 5-hour session, the weekly all-models window, and any
 per-model weekly windows — you have consumed, as percent-of-allowance progress
-bars. These are the same numbers `claude /status` reports.
+bars. These are the same numbers `claude /status` reports. It also watches
+Anthropic's public status page, so an open incident there is called out beside
+the numbers — an outage is then not mistaken for your own quota. See
+[Open incidents](#open-incidents).
 
 The data comes entirely from Anthropic's usage API; the tool does **not** read
 the Claude CLI session logs or any other CLI byproduct. Its only local
@@ -59,6 +62,26 @@ an overall `Spend` bar) appear automatically; on subscription plans the API
 reports no dollars, so they are omitted. Regenerate this capture with
 `cargo test render_monitor -- --nocapture`.
 
+### Open incidents
+
+While <https://status.claude.com> lists an unresolved incident, its name is
+shown on the top-right border, in red for a `major`/`critical` impact and
+yellow otherwise. With several open, the worst is named and the rest counted
+(`⚠ Elevated errors (+1)`):
+
+```text
+┌ Claude usage limits · Max 5x ─── ⚠ Elevated errors for Claude Sonnet 5 ┐
+│ Session (5h)        ━━───────────────────  11% used · resets in 37m    │
+```
+
+The text is cut to the room the title leaves — first shortened with an
+ellipsis (`⚠ Elevated err…`), then down to the bare `⚠`. Nothing is shown when
+the page lists no incident, and nothing either when it could not be reached:
+"unknown" is never presented as bad news, and never as an error in the usage
+display. `--no-incidents` turns the check off (no marker, no request to the
+status page). Regenerate the capture with
+`cargo test open_incident -- --nocapture`.
+
 ## Build & run
 
 Requires a Rust toolchain (1.74+). Install via <https://rustup.rs> if needed.
@@ -70,6 +93,7 @@ cargo run --release -- -1 --no-border # render once without the box border
 cargo run --release -- --polybar     # print one status-bar line, then exit
 cargo run --release -- --polybar --interval 300   # ... or a line every 5 min
 cargo run --release -- --json        # print the windows as JSON, then exit
+cargo run --release -- --no-incidents # any mode, without the status-page check
 cargo run --release -- --write-back  # also refresh an expired token in-place
 cargo run --release -- --check-rotation  # check if the refresh token rotates
 cargo test                           # run the unit tests
@@ -121,6 +145,20 @@ week, `$` for spend. The **binding** window (the one you hit first — `◀` in 
 TUI) is set in polybar's second font slot, which is conventionally the bold
 face, so it stands out without extra width.
 
+An open incident on the status page puts a `⚠` **in front** of the line,
+coloured by the incident's impact — critical colour for `major`/`critical`,
+warning colour otherwise:
+
+```text
+%{F#ff5555}⚠%{F-} %{F#50fa7b}5h 11%%{F-} · …
+```
+
+so the bar reads `⚠ 5h 11% · wk 39% · Sonnet 62%`. The tail-mode stale marker
+(below) goes *after* the line; the two say different things — "Anthropic has a
+problem" versus "this line is old" — so they sit at opposite ends. A
+`click-right = xdg-open https://status.claude.com/` on the module makes the
+page one click away.
+
 ```ini
 [module/claude]
 type = custom/script
@@ -136,7 +174,8 @@ tail = true
 | `--no-color`             | plain text, no format tags                                  |
 
 These four are only valid with `--polybar`; `--cache-ttl` and `--no-cache`
-([Sharing between instances](#sharing-between-instances)) apply to every mode.
+([Sharing between instances](#sharing-between-instances)) and `--no-incidents`
+([Open incidents](#open-incidents)) apply to every mode.
 Both `--opt V` and `--opt=V` are accepted.
 
 With `--no-color` (and `--bold-font 0`) the line is plain
@@ -211,7 +250,9 @@ endpoint on the same schedule.
 Every instance reads and writes `~/.cache/claude-usage/usage.json`. One that
 finds no entry younger than its TTL takes a lock file, fetches, and publishes
 the result for the others; an instance that finds the lock held reuses the last
-published entry rather than making the same call beside it.
+published entry rather than making the same call beside it. The status-page
+check is shared the same way, in a slot of its own (`incidents.json`, with its
+own lock) on the same TTL, so the two fetches never wait on each other.
 
 | Mode                       | Cache TTL                                        |
 | -------------------------- | ------------------------------------------------ |
@@ -254,6 +295,18 @@ Once at startup it also calls `GET /api/oauth/profile` to read your plan /
 rate-limit tier (e.g. `Max 5x`) and show it in the header; this is more accurate
 than the `subscriptionType` recorded in the credentials file. The refresh loop
 only re-hits the usage endpoint.
+
+Alongside each usage fetch (unless `--no-incidents`) it reads the unresolved
+incidents from Anthropic's status page — a Statuspage instance with a
+documented, unauthenticated API:
+
+```
+GET https://status.claude.com/api/v2/incidents/unresolved.json
+```
+
+No token is sent there. Each incident's `name`, `impact` and `status` become
+the marker described under [Open incidents](#open-incidents); a failed check
+is "unknown" and shows nothing.
 
 Your token is sent only to Anthropic's own API.
 
@@ -317,11 +370,20 @@ claude-usage --check-rotation   # reports the verdict
     { "label": "Week (all models)", "group": "weekly", "percent": 39,
       "severity": "normal", "resets_at": "2026-06-23T06:00:00+00:00",
       "is_active": true }
+  ],
+  "incidents": [
+    { "name": "Elevated errors for Claude Sonnet 5", "impact": "major",
+      "status": "investigating", "url": "https://stspg.io/jt14jk41pjsf" }
   ]
 }
 ```
 
-On a failed fetch the body is `{ "error": "..." }` and the exit code is non-zero.
+`incidents` lists the status page's unresolved incidents, worst first: `[]`
+when it is all clear, `null` when the page was not checked (`--no-incidents`)
+or could not be reached — so a script can tell "all clear" from "unknown".
+
+On a failed fetch the body is `{ "error": "...", "incidents": … }` and the exit
+code is non-zero.
 
 ## Layout
 
@@ -329,12 +391,13 @@ On a failed fetch the body is `{ "error": "..." }` and the exit code is non-zero
 src/
 ├── main.rs        argument parsing + dispatch (UI vs --json vs --check-rotation)
 ├── usage_api.rs   fetches & parses GET /api/oauth/usage; OAuth token refresh
+├── incidents.rs   fetches & parses the status page's unresolved incidents
 ├── views.rs       UsageStatus -> pre-formatted gauge rows
 ├── tui.rs         ratatui monitor (gauges, refresh, key handling)
 ├── polybar.rs     --polybar: one-line status-bar rendering + the tail loop
-├── cache.rs       cross-process cache: one fetch serves every instance
+├── cache.rs       cross-process cache: one fetch (usage, incidents) serves every instance
 ├── rotation.rs    --check-rotation: passive refresh-token rotation probe
-└── json.rs        JSON form of the usage windows
+└── json.rs        JSON form of the usage windows and the open incidents
 
 docs/
 ├── design.md      why it is shaped so: decisions, rejected alternatives

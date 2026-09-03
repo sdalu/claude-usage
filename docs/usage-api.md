@@ -159,8 +159,37 @@ Identity and the authoritative plan/rate-limit tier.
 
 ---
 
+## Status page (Statuspage API v2, public)
+
+<https://status.claude.com> is an Atlassian Statuspage instance, which exposes
+its documented, unauthenticated JSON API under `/api/v2/`. The tool reads one
+endpoint:
+
+```
+GET https://status.claude.com/api/v2/incidents/unresolved.json
+```
+
+No token, no special header. The reply is `{ "page": {…}, "incidents": [ … ] }`
+where each incident carries (among others):
+
+| Field | Meaning |
+| ----- | ------- |
+| `name` | headline, e.g. `Elevated errors for Claude Sonnet 5` |
+| `impact` | `none` / `minor` / `major` / `critical` — the page owner's grading |
+| `status` | lifecycle stage: `investigating`, `identified`, `monitoring` (resolved ones are not listed) |
+| `shortlink` | `https://stspg.io/…` link to the incident |
+| `incident_updates[]` | the timeline, newest first (not used) |
+
+The list is newest first; the tool re-sorts it worst impact first. Other
+endpoints of the same API (`summary.json`, `status.json`, `components.json`,
+`scheduled-maintenances/*.json`) are documented at
+<https://developer.statuspage.io/> and are not consulted.
+
+---
+
 ## What this tool uses
 
-Only `GET /api/oauth/usage` → `limits[]` (+ per-window dollars and `spend` when
-present). Everything shown in the UI comes from that single call; the OAuth
-token is the sole local dependency.
+`GET /api/oauth/usage` → `limits[]` (+ per-window dollars and `spend` when
+present) for everything shown as a gauge; the OAuth token is the sole local
+dependency. Plus, unless `--no-incidents`, the status page's unresolved
+incidents above, for the incident marker only.

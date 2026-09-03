@@ -17,15 +17,25 @@ use ratatui::{
     DefaultTerminal, Frame, Terminal,
 };
 
+use crate::incidents::Incidents;
 use crate::usage_api::UsageStatus;
 use crate::views::{GaugeView, Level, Views};
 
 /// How long the "?" help marker flashes at startup before fading away.
 const INTRO_SECS: f64 = 3.0;
 
+/// Columns the " ? " marker takes on the top border, plus its gap.
+const INTRO_HINT_WIDTH: usize = 4;
+
+/// The incident marker on the top border, with its surrounding spaces.
+const ALERT_MARKER: &str = " \u{26a0} ";
+const ALERT_MARKER_WIDTH: usize = 3;
+
 pub struct App {
     views: Views,
     plan: Option<String>,
+    /// The status page's open incidents; None when not checked (or unknown).
+    incidents: Option<Incidents>,
     last_refresh: DateTime<Local>,
     auto_interval: chrono::Duration,
     show_help: bool,
@@ -44,6 +54,7 @@ impl App {
             last_refresh: fetched_at(&status),
             views: crate::views::build(&status),
             plan,
+            incidents: None,
             auto_interval: chrono::Duration::minutes(5),
             show_help: false,
             show_updated: false,
@@ -52,6 +63,12 @@ impl App {
             started: Instant::now(),
             intro_was_active: false,
         }
+    }
+
+    /// Supplies the status page's open incidents, called out on the top border.
+    pub fn with_incidents(mut self, incidents: Option<Incidents>) -> Self {
+        self.incidents = incidents;
+        self
     }
 
     /// Disables the startup "?" flash (used by single-shot rendering).
@@ -169,6 +186,21 @@ impl App {
         let status = crate::cache::fetch(ttl);
         self.last_refresh = fetched_at(&status);
         self.views = crate::views::build(&status);
+        self.incidents = crate::cache::fetch_incidents(ttl);
+    }
+
+    /// The incident to call out: the worst open one, with a count of any
+    /// others, and the severity it is shown in.
+    fn alert(&self) -> Option<(String, Level)> {
+        let incidents = self.incidents.as_ref()?;
+        let worst = incidents.worst()?;
+        let others = incidents.open.len() - 1;
+        let text = if others > 0 {
+            format!("{} (+{others})", worst.name)
+        } else {
+            worst.name.clone()
+        };
+        Some((text, worst.impact.level()))
     }
 
     fn toggle_interval(&mut self) {
@@ -226,6 +258,7 @@ impl App {
             Some(plan) => format!(" Claude usage limits \u{b7} {plan} "),
             None => " Claude usage limits ".to_string(),
         };
+        let title_width = title.chars().count();
         let mut block = Block::default()
             .borders(Borders::ALL)
             .title(title)
@@ -249,6 +282,30 @@ impl App {
             ])
             .right_aligned();
             block = block.title_bottom(updated);
+        }
+        // An open incident on the status page is called out on the top-right
+        // border, coloured by its impact and cut to the room the left title
+        // (and, during the intro, the "?" marker) leaves. Added before the
+        // hint, which ratatui then lays out to its right.
+        if let Some((text, level)) = self.alert() {
+            let reserved = title_width
+                + 2
+                + if self.intro_active() {
+                    INTRO_HINT_WIDTH
+                } else {
+                    0
+                };
+            let avail = (area.width as usize).saturating_sub(reserved);
+            if let Some(alert) = fit_alert(&text, avail) {
+                let color = match level {
+                    Level::Crit => Color::Red,
+                    _ => Color::Yellow,
+                };
+                block = block.title(
+                    Line::from(Span::styled(alert, Style::new().fg(color).bold()))
+                        .right_aligned(),
+                );
+            }
         }
         // A "?" flashes on the top-right border at startup, then fades away.
         if let Some(hint) = self.intro_hint() {
@@ -362,6 +419,27 @@ fn fetched_at(status: &Result<UsageStatus, String>) -> DateTime<Local> {
         Ok(s) => s.fetched_at,
         Err(_) => Local::now(),
     }
+}
+
+/// The border text for an incident, cut to `avail` columns: the full name,
+/// then a truncated one ending in an ellipsis, then the bare marker; None when
+/// not even that fits. Names are counted in chars, which is exact for the
+/// ASCII the status page uses.
+fn fit_alert(text: &str, avail: usize) -> Option<String> {
+    let full = format!("{ALERT_MARKER}{text} ");
+    if full.chars().count() <= avail {
+        return Some(full);
+    }
+    // Marker, a few characters of the name, "… ".
+    if avail >= ALERT_MARKER_WIDTH + 5 {
+        let keep = avail - ALERT_MARKER_WIDTH - 2;
+        let cut: String = text.chars().take(keep).collect();
+        return Some(format!("{ALERT_MARKER}{}\u{2026} ", cut.trim_end()));
+    }
+    if avail >= ALERT_MARKER_WIDTH {
+        return Some(ALERT_MARKER.to_string());
+    }
+    None
 }
 
 /// A centred rectangle of the given size, clamped to `area`.
@@ -675,6 +753,82 @@ mod tests {
         app.started = std::time::Instant::now() - std::time::Duration::from_secs(10);
         assert!(!app.intro_active());
         assert!(app.intro_hint().is_none());
+    }
+
+    fn incidents(body: &str) -> Incidents {
+        crate::incidents::parse(body).unwrap()
+    }
+
+    const ONE_INCIDENT: &str = r#"{"incidents":[{"name":"Elevated errors for Claude Sonnet 5",
+        "status":"investigating","impact":"major"}]}"#;
+
+    fn frame(width: u16, incidents: Incidents) -> String {
+        let mut app = App::new(usage_api::parse(&sample()), Some("Max 5x".into()))
+            .without_intro()
+            .with_incidents(Some(incidents));
+        let mut terminal = Terminal::new(TestBackend::new(width, 6)).unwrap();
+        terminal.draw(|f| app.draw(f)).unwrap();
+        format!("{}", terminal.backend())
+    }
+
+    fn top_border(width: u16, incidents: Incidents) -> String {
+        frame(width, incidents).lines().next().unwrap().to_string()
+    }
+
+    /// Also the source of the README capture with an incident
+    /// (`cargo test open_incident -- --nocapture`), at the README's width.
+    #[test]
+    fn open_incident_is_called_out_on_the_top_border() {
+        let rendered = frame(74, incidents(ONE_INCIDENT));
+        let top = rendered.lines().next().unwrap();
+        assert!(top.contains("Claude usage limits \u{b7} Max 5x"));
+        assert!(top.contains("\u{26a0} Elevated errors for Claude Sonnet 5 "));
+        println!("\n{rendered}");
+
+        // Several open: the worst is named, the rest counted.
+        let two = incidents(
+            r#"{"incidents":[
+                {"name":"Degraded uploads","status":"monitoring","impact":"minor"},
+                {"name":"Elevated errors","status":"investigating","impact":"major"}]}"#,
+        );
+        assert!(top_border(80, two).contains("\u{26a0} Elevated errors (+1) "));
+    }
+
+    #[test]
+    fn incident_text_is_cut_to_the_room_left() {
+        // The left title and corners take 32 columns of a 60-wide box.
+        let top = top_border(60, incidents(ONE_INCIDENT));
+        assert!(top.contains("\u{26a0} Elevated errors"), "{top}");
+        assert!(top.contains('\u{2026}'), "{top}");
+        assert!(!top.contains("Sonnet 5"), "{top}");
+        // Narrower still: the marker alone.
+        let top = top_border(36, incidents(ONE_INCIDENT));
+        assert!(top.contains('\u{26a0}'), "{top}");
+        assert!(!top.contains("Elev"), "{top}");
+    }
+
+    #[test]
+    fn all_clear_and_unknown_show_nothing() {
+        assert!(!top_border(80, incidents(r#"{"incidents":[]}"#)).contains('\u{26a0}'));
+        let mut app = App::new(usage_api::parse(&sample()), None).without_intro();
+        assert!(app.alert().is_none());
+        let mut terminal = Terminal::new(TestBackend::new(80, 6)).unwrap();
+        terminal.draw(|f| app.draw(f)).unwrap();
+        assert!(!format!("{}", terminal.backend()).contains('\u{26a0}'));
+    }
+
+    #[test]
+    fn fit_alert_steps_down() {
+        let name = "Elevated errors for Claude Sonnet 5";
+        assert_eq!(
+            fit_alert(name, 80).unwrap(),
+            " \u{26a0} Elevated errors for Claude Sonnet 5 "
+        );
+        let cut = fit_alert(name, 20).unwrap();
+        assert_eq!(cut.chars().count(), 20);
+        assert!(cut.ends_with("\u{2026} "));
+        assert_eq!(fit_alert(name, 5).unwrap(), " \u{26a0} ");
+        assert!(fit_alert(name, 2).is_none());
     }
 
     #[test]

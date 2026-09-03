@@ -15,15 +15,25 @@
 //! polybar's second font slot, which is where bar configs conventionally put a
 //! bold face. `--no-color` drops every tag, leaving plain text that suits
 //! waybar, i3blocks, tmux or a shell prompt just as well.
+//!
+//! Two markers can frame the line. An open incident on the status page puts a
+//! `⚠` *in front*, coloured by the incident's impact; a refresh failing in tail
+//! mode appends one *after* the last good numbers, in the warning colour. They
+//! say different things — "Anthropic has a problem" versus "this line is old" —
+//! so they sit at opposite ends.
 
 use std::io::Write;
 use std::time::Duration;
 
+use crate::incidents::Incidents;
 use crate::usage_api::{LimitWindow, UsageStatus};
 use crate::views::{level, Level};
 
 /// Separator between window segments.
 const SEP: &str = " \u{b7} ";
+
+/// Put in front of the line while the status page lists an open incident.
+const INCIDENT: &str = "\u{26a0}";
 
 /// Polybar font slot used for the binding window; `font-1` in the bar config
 /// (slots are 1-based in the tag, 0-based in the config key). 0 disables it.
@@ -128,34 +138,53 @@ pub fn render(status: &Result<UsageStatus, String>, opts: &Options) -> String {
     }
 }
 
+/// The module line, with a warning marker in front of it while the status page
+/// lists an open incident (coloured by the worst one's impact). Nothing is
+/// added when there is none — or when the page could not be checked, which is
+/// unknown rather than bad news.
+pub fn render_line(
+    status: &Result<UsageStatus, String>,
+    incidents: Option<&Incidents>,
+    opts: &Options,
+) -> String {
+    let line = render(status, opts);
+    match incidents.and_then(Incidents::worst) {
+        Some(worst) => format!("{} {line}", opts.paint(INCIDENT, worst.impact.level())),
+        None => line,
+    }
+}
+
 /// Tail mode: one long-lived process printing a line per refresh for a polybar
 /// `tail = true` module. Fetches on `interval`, doubling the wait after each
 /// consecutive failure (up to [`MAX_BACKOFF`]) so a rate-limited API is not
 /// hammered, and keeps the last good line on the bar — marked stale — instead
 /// of blanking it out. Returns when stdout closes, i.e. polybar went away.
+///
+/// `refresh` yields the usage and the status-page check together; only the
+/// usage drives the backoff, the incident marker just reflects the latest check.
 pub fn run_tail(
     interval: Duration,
     opts: &Options,
-    refresh: impl Fn() -> Result<UsageStatus, String>,
+    refresh: impl Fn() -> (Result<UsageStatus, String>, Option<Incidents>),
 ) -> i32 {
     let mut last_good: Option<UsageStatus> = None;
     let mut failures: u32 = 0;
 
     loop {
-        let status = refresh();
+        let (status, incidents) = refresh();
         let line = match &status {
             Ok(s) => {
                 last_good = Some(s.clone());
                 failures = 0;
-                render(&status, opts)
+                render_line(&status, incidents.as_ref(), opts)
             }
             Err(_) => {
                 failures = failures.saturating_add(1);
                 match &last_good {
                     // Refresh failed but we have numbers: keep them, flagged.
-                    Some(previous) => stale(previous, opts),
+                    Some(previous) => stale(previous, incidents.as_ref(), opts),
                     // Nothing was ever fetched: the error is all we can say.
-                    None => render(&status, opts),
+                    None => render_line(&status, incidents.as_ref(), opts),
                 }
             }
         };
@@ -167,8 +196,8 @@ pub fn run_tail(
 }
 
 /// The last good line with a stale marker, shown while refreshes fail.
-fn stale(previous: &UsageStatus, opts: &Options) -> String {
-    let line = render(&Ok(previous.clone()), opts);
+fn stale(previous: &UsageStatus, incidents: Option<&Incidents>, opts: &Options) -> String {
+    let line = render_line(&Ok(previous.clone()), incidents, opts);
     format!("{line}{}", opts.paint(STALE, Level::Warn))
 }
 
@@ -378,8 +407,63 @@ mod tests {
         };
         let previous = usage_api::parse(SAMPLE).unwrap();
         assert_eq!(
-            stale(&previous, &opts),
+            stale(&previous, None, &opts),
             "5h 11% \u{b7} wk 39% \u{b7} Sonnet 62% \u{26a0}"
+        );
+    }
+
+    fn incidents(impact: &str) -> Incidents {
+        crate::incidents::parse(&format!(
+            r#"{{"incidents":[{{"name":"Elevated errors","status":"investigating",
+                "impact":"{impact}"}}]}}"#
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn an_open_incident_is_flagged_in_front() {
+        let opts = Options {
+            bold_font: 0,
+            ..Options::default()
+        };
+        let status = usage_api::parse(SAMPLE);
+        // A major incident takes the critical colour ...
+        let line = render_line(&status, Some(&incidents("major")), &opts);
+        assert!(
+            line.starts_with("%{F#ff5555}\u{26a0}%{F-} %{F#50fa7b}5h 11%"),
+            "{line}"
+        );
+        // ... a minor one the warning colour.
+        let line = render_line(&status, Some(&incidents("minor")), &opts);
+        assert!(line.starts_with("%{F#f1fa8c}\u{26a0}%{F-} "), "{line}");
+    }
+
+    #[test]
+    fn no_incident_means_no_marker() {
+        let opts = Options {
+            color: false,
+            bold_font: 0,
+            ..Options::default()
+        };
+        let status = usage_api::parse(SAMPLE);
+        let expected = "5h 11% \u{b7} wk 39% \u{b7} Sonnet 62%";
+        let all_clear = crate::incidents::parse(r#"{"incidents":[]}"#).unwrap();
+        assert_eq!(render_line(&status, Some(&all_clear), &opts), expected);
+        // Unknown (the page could not be checked) is shown as nothing, too.
+        assert_eq!(render_line(&status, None, &opts), expected);
+    }
+
+    #[test]
+    fn incident_and_stale_markers_sit_at_opposite_ends() {
+        let opts = Options {
+            color: false,
+            bold_font: 0,
+            ..Options::default()
+        };
+        let previous = usage_api::parse(SAMPLE).unwrap();
+        assert_eq!(
+            stale(&previous, Some(&incidents("major")), &opts),
+            "\u{26a0} 5h 11% \u{b7} wk 39% \u{b7} Sonnet 62% \u{26a0}"
         );
     }
 

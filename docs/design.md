@@ -121,6 +121,41 @@ and the rest ride on that entry for the remainder of the window.
 The cache is an optimisation, never a dependency: an unusable cache directory
 falls through to a direct fetch, and `--no-cache` turns sharing off entirely.
 
+## The status page check
+
+A usage monitor that only shows percentages leaves one question open: when
+requests start failing, is it my quota or is it Anthropic? The status page
+answers it, so the tool reads it and puts the answer beside the numbers.
+
+**Why the unresolved-incidents list, and nothing else.** Statuspage's v2 API
+also exposes per-component states and scheduled maintenances. The monitor's
+question is "is something wrong right now", and an open incident is the page's
+own, human-curated answer to it; component states flap, and maintenance windows
+are not outages. One endpoint, one list, no interpretation.
+
+**Why it is a decoration, never an error.** The usage numbers are the product;
+the incident marker is a hint about *why* they might be misbehaving. A status
+page that cannot be reached must therefore not turn a working display into an
+error, and must not be shown as an outage either — "unknown" renders as
+nothing, in every mode, and `--json` says `null` so a script can tell it from
+`[]`. The same reasoning made the plan name a best-effort decoration.
+
+**Why the marker is in front on the bar.** Tail mode already appends a `⚠` for
+"this line is stale". The incident marker means something else — "Anthropic has
+a problem" — and colouring alone would not separate them. Putting one at each
+end keeps both readable at a glance, and a glance is all a bar gets.
+
+**Why it rides on the usage TTL and has its own cache slot.** Checking the page
+per usage refresh is the natural cadence — an incident matters when one is
+looking at the numbers — and going through the shared cache keeps N bars to one
+request, as for the usage. It gets a slot and a lock of its own so a slow or
+stuck status page never delays the usage fetch, and vice versa.
+
+**Why severity follows `impact`.** Statuspage's `impact` is the page owner's
+own grading; `major` and `critical` are shown in the critical colour, `minor`
+and `none` as a warning. Mapping it rather than parsing the incident text keeps
+the rule stable across wording.
+
 ## Testing the refusals
 
 Parsing is a pure function (`parse_args` → a `Config`, a `Refusal`, or one of
@@ -140,3 +175,6 @@ parsed (the write-back and cache toggles, which are process-wide) stays in
   later. Polybar signals the process, so this shows up only when testing by
   hand (piping into `head` looks like a hang).
 - No history: see "One data source" above.
+- The status page is read only at the usage cadence, so an incident opened
+  between two refreshes shows up at the next one, and a degraded component
+  without an incident declared against it is not seen at all.

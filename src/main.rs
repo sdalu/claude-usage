@@ -7,6 +7,7 @@
 //! logs or any other CLI byproduct.
 
 mod cache;
+mod incidents;
 mod json;
 mod polybar;
 mod rotation;
@@ -16,11 +17,12 @@ mod views;
 
 const USAGE: &str = "\
 Usage: claude-usage [-1 [--no-border]] [--polybar [options]] [--json]
-                    [--write-back] [--check-rotation] [--help]
+                    [--no-incidents] [--write-back] [--check-rotation] [--help]
 
 A live monitor of your Claude plan usage windows (percent of allowance used),
 fetched from https://api.anthropic.com/api/oauth/usage using the OAuth token in
-~/.claude/.credentials.json.
+~/.claude/.credentials.json. An open incident on https://status.claude.com is
+called out beside the numbers, so an outage is not mistaken for your quota.
 
 Options:
   -1           render the dashboard once and exit (no live updates)
@@ -34,6 +36,9 @@ Options:
                reuse another instance's result if it is younger than N
                seconds (default: just under --interval, or 240s for a
                one-shot --polybar; other modes fetch fresh)
+  --no-incidents
+               do not consult the status page: no incident marker, and no
+               request to status.claude.com
   --write-back refresh an expired OAuth token and write the rotated
                credentials back to ~/.claude/.credentials.json. Default
                is read-only: an expired token is reported, never rewritten.
@@ -82,6 +87,7 @@ struct Config {
     polybar_interval: Option<u64>,
     cache_ttl: Option<u64>,
     cache: bool,
+    incidents: bool,
     write_back: bool,
 }
 
@@ -121,6 +127,7 @@ enum Parsed {
 fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Parsed, Refusal> {
     let mut config = Config {
         cache: true,
+        incidents: true,
         ..Config::default()
     };
     // Set by any option that only means something for --polybar, so using one
@@ -184,6 +191,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Parsed, Refusal>
                 })?);
             }
             "--no-cache" => config.cache = false,
+            "--no-incidents" => config.incidents = false,
             "--write-back" => config.write_back = true,
             // Standalone diagnostic: runs and exits, ignoring the other flags.
             "--check-rotation" => return Ok(Parsed::CheckRotation),
@@ -233,11 +241,13 @@ fn real_main() -> i32 {
         polybar_interval,
         cache_ttl,
         cache: cache_enabled,
+        incidents: incidents_enabled,
         write_back,
     } = *config;
 
     usage_api::set_write_back(write_back);
     cache::set_enabled(cache_enabled);
+    incidents::set_enabled(incidents_enabled);
 
     // Tail mode owns its own refresh cadence (and its backoff), so it fetches
     // inside the loop rather than sharing the one-shot fetch below.
@@ -248,7 +258,9 @@ fn real_main() -> i32 {
         let ttl = cache_ttl
             .map(std::time::Duration::from_secs)
             .unwrap_or_else(|| interval.mul_f64(0.9));
-        return polybar::run_tail(interval, &polybar_opts, || cache::fetch(ttl));
+        return polybar::run_tail(interval, &polybar_opts, || {
+            (cache::fetch(ttl), cache::fetch_incidents(ttl))
+        });
     }
 
     // One-shot polybar reads through the shared cache (its default TTL covers
@@ -260,9 +272,12 @@ fn real_main() -> i32 {
         (false, None) => std::time::Duration::ZERO,
     };
     let status = cache::fetch(ttl);
+    // The status-page check rides on the same TTL; unknown (skipped or failed)
+    // is None and shows as nothing.
+    let incidents = cache::fetch_incidents(ttl);
 
     if json_mode {
-        match serde_json::to_string_pretty(&json::build(&status)) {
+        match serde_json::to_string_pretty(&json::build(&status, incidents.as_ref())) {
             Ok(s) => println!("{s}"),
             Err(e) => {
                 eprintln!("claude-usage: {e}");
@@ -277,7 +292,10 @@ fn real_main() -> i32 {
     // Status-bar line: the error, if any, is reported in the line itself, and
     // the exit status stays 0 so polybar keeps rendering the module.
     if polybar_mode {
-        println!("{}", polybar::render(&status, &polybar_opts));
+        println!(
+            "{}",
+            polybar::render_line(&status, incidents.as_ref(), &polybar_opts)
+        );
         return 0;
     }
 
@@ -287,7 +305,9 @@ fn real_main() -> i32 {
 
     // Single-shot: render one frame inline and quit (no "?" flash, no input).
     if oneshot {
-        let mut app = tui::App::new(status, plan).without_intro();
+        let mut app = tui::App::new(status, plan)
+            .with_incidents(incidents)
+            .without_intro();
         if no_border {
             app = app.without_border();
         }
@@ -300,7 +320,7 @@ fn real_main() -> i32 {
         };
     }
 
-    let app = tui::App::new(status, plan);
+    let app = tui::App::new(status, plan).with_incidents(incidents);
     let mut terminal = ratatui::init();
     let result = app.run(&mut terminal);
     ratatui::restore();
@@ -341,8 +361,9 @@ mod tests {
         assert!(!config.oneshot);
         assert!(!config.polybar_mode);
         assert!(!config.write_back);
-        // Sharing is on unless it is opted out of.
+        // Sharing and the status-page check are on unless opted out of.
         assert!(config.cache);
+        assert!(config.incidents);
         assert_eq!(config.cache_ttl, None);
     }
 
@@ -379,6 +400,7 @@ mod tests {
         // drive are not asserted on, since other tests share them.
         assert!(config(&["--write-back"]).write_back);
         assert!(!config(&["--no-cache"]).cache);
+        assert!(!config(&["--no-incidents"]).incidents);
     }
 
     #[test]

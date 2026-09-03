@@ -28,6 +28,13 @@ everything else parses fixtures.
 - **Testing tail mode by hand:** `--polybar --interval N` notices a closed
   stdout only at its next write, so piping it into `head` looks like a hang for
   up to N seconds. Read one line with `timeout` instead.
-- **Running the binary hits the live API** and shares its result through
-  `~/.cache/claude-usage/usage.json`; `--no-cache` bypasses that when you need
-  to observe a real request.
+- **Running the binary hits the live API** and the public status page, and
+  shares both results through `~/.cache/claude-usage/{usage,incidents}.json`;
+  `--no-cache` bypasses that when you need to observe a real request, and
+  `--no-incidents` skips the status page. Several `--no-cache` runs in a row
+  earn a 429.
+- **Seeing the incident marker when nothing is wrong:** point
+  `XDG_CACHE_HOME` at a scratch directory holding a hand-written
+  `claude-usage/incidents.json` (`{"fetched_at": <ms>, "body": "<reply>"}`)
+  with a fresh stamp, and run with `--cache-ttl 600`. The real cache is then
+  untouched.
