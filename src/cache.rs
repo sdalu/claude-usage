@@ -39,11 +39,16 @@ pub fn set_enabled(enabled: bool) {
     ENABLED.store(enabled, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Whether cross-process sharing is on.
+pub fn enabled() -> bool {
+    ENABLED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Returns the shared usage status, fetching only if no published entry is
 /// younger than `ttl`. A zero TTL forces a fetch (and publishes it), which is
 /// what an explicit refresh should do.
 pub fn fetch(ttl: Duration) -> Result<UsageStatus, String> {
-    if !ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
+    if !enabled() {
         return usage_api::fetch();
     }
     match dir() {

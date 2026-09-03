@@ -69,16 +69,63 @@ fn main() {
     std::process::exit(real_main());
 }
 
-fn real_main() -> i32 {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let mut json_mode = false;
-    let mut oneshot = false;
-    let mut no_border = false;
-    let mut polybar_mode = false;
-    let mut polybar_opts = polybar::Options::default();
+/// What the command line selected. Parsing records the choices and applies
+/// nothing, so it can be tested without touching the network, the credentials
+/// file or the process-wide toggles.
+#[derive(Default)]
+struct Config {
+    json_mode: bool,
+    oneshot: bool,
+    no_border: bool,
+    polybar_mode: bool,
+    polybar_opts: polybar::Options,
+    polybar_interval: Option<u64>,
+    cache_ttl: Option<u64>,
+    cache: bool,
+    write_back: bool,
+}
+
+/// A rejected command line: what to say, and whether the usage text follows.
+/// Misuse of an option prints the usage; a bad *value* for a valid option
+/// speaks for itself.
+struct Refusal {
+    message: String,
+    show_usage: bool,
+}
+
+impl Refusal {
+    fn new(message: impl Into<String>) -> Refusal {
+        Refusal {
+            message: message.into(),
+            show_usage: false,
+        }
+    }
+
+    fn with_usage(message: impl Into<String>) -> Refusal {
+        Refusal {
+            message: message.into(),
+            show_usage: true,
+        }
+    }
+}
+
+/// The modes that exit before anything is fetched, kept as parse outcomes so
+/// they stop the scan exactly where the flag appeared — `--check-rotation` and
+/// `--help` ignore whatever follows them.
+enum Parsed {
+    Run(Box<Config>),
+    Help,
+    CheckRotation,
+}
+
+fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Parsed, Refusal> {
+    let mut config = Config {
+        cache: true,
+        ..Config::default()
+    };
+    // Set by any option that only means something for --polybar, so using one
+    // without it is caught rather than silently ignored.
     let mut polybar_tuning = false;
-    let mut polybar_interval: Option<u64> = None;
-    let mut cache_ttl: Option<u64> = None;
 
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
@@ -87,114 +134,110 @@ fn real_main() -> i32 {
             Some((flag, value)) => (flag.to_string(), Some(value.to_string())),
             None => (arg.clone(), None),
         };
-        let mut value = |name: &str| -> Result<String, i32> {
-            inline.clone().or_else(|| args.next()).ok_or_else(|| {
-                eprintln!("claude-usage: {name} needs a value");
-                1
-            })
+        let mut value = |name: &str| -> Result<String, Refusal> {
+            inline
+                .clone()
+                .or_else(|| args.next())
+                .ok_or_else(|| Refusal::new(format!("{name} needs a value")))
         };
         match flag.as_str() {
-            "--json" => json_mode = true,
-            "-1" => oneshot = true,
-            "--no-border" => no_border = true,
-            "--polybar" => polybar_mode = true,
+            "--json" => config.json_mode = true,
+            "-1" => config.oneshot = true,
+            "--no-border" => config.no_border = true,
+            "--polybar" => config.polybar_mode = true,
             "--no-color" => {
-                polybar_opts.color = false;
+                config.polybar_opts.color = false;
                 polybar_tuning = true;
             }
             "--bold-font" => {
-                let raw = match value("--bold-font") {
-                    Ok(v) => v,
-                    Err(code) => return code,
-                };
+                let raw = value("--bold-font")?;
                 polybar_tuning = true;
-                match raw.parse::<u8>() {
-                    Ok(slot) => polybar_opts.bold_font = slot,
-                    Err(_) => {
-                        eprintln!("claude-usage: --bold-font wants a font slot number: {raw}");
-                        return 1;
-                    }
-                }
+                config.polybar_opts.bold_font = raw.parse::<u8>().map_err(|_| {
+                    Refusal::new(format!("--bold-font wants a font slot number: {raw}"))
+                })?;
             }
             "--interval" => {
-                let raw = match value("--interval") {
-                    Ok(v) => v,
-                    Err(code) => return code,
-                };
+                let raw = value("--interval")?;
                 polybar_tuning = true;
-                match raw.parse::<u64>() {
-                    Ok(secs) if secs >= polybar::MIN_INTERVAL => polybar_interval = Some(secs),
-                    Ok(secs) => {
-                        eprintln!(
-                            "claude-usage: --interval {secs} is below the {}s minimum \
-                             (the usage API is rate limited)",
-                            polybar::MIN_INTERVAL
-                        );
-                        return 1;
-                    }
-                    Err(_) => {
-                        eprintln!("claude-usage: --interval wants a number of seconds: {raw}");
-                        return 1;
-                    }
+                let secs = raw.parse::<u64>().map_err(|_| {
+                    Refusal::new(format!("--interval wants a number of seconds: {raw}"))
+                })?;
+                if secs < polybar::MIN_INTERVAL {
+                    return Err(Refusal::new(format!(
+                        "--interval {secs} is below the {}s minimum \
+                         (the usage API is rate limited)",
+                        polybar::MIN_INTERVAL
+                    )));
                 }
+                config.polybar_interval = Some(secs);
             }
             "--colors" => {
-                let raw = match value("--colors") {
-                    Ok(v) => v,
-                    Err(code) => return code,
-                };
+                let raw = value("--colors")?;
                 polybar_tuning = true;
-                match polybar::Palette::parse(&raw) {
-                    Ok(palette) => polybar_opts.palette = palette,
-                    Err(e) => {
-                        eprintln!("claude-usage: --colors: {e}");
-                        return 1;
-                    }
-                }
+                config.polybar_opts.palette = polybar::Palette::parse(&raw)
+                    .map_err(|e| Refusal::new(format!("--colors: {e}")))?;
             }
             "--cache-ttl" => {
-                let raw = match value("--cache-ttl") {
-                    Ok(v) => v,
-                    Err(code) => return code,
-                };
-                match raw.parse::<u64>() {
-                    Ok(secs) => cache_ttl = Some(secs),
-                    Err(_) => {
-                        eprintln!("claude-usage: --cache-ttl wants a number of seconds: {raw}");
-                        return 1;
-                    }
-                }
+                let raw = value("--cache-ttl")?;
+                config.cache_ttl = Some(raw.parse::<u64>().map_err(|_| {
+                    Refusal::new(format!("--cache-ttl wants a number of seconds: {raw}"))
+                })?);
             }
-            "--no-cache" => cache::set_enabled(false),
-            "--write-back" => usage_api::set_write_back(true),
+            "--no-cache" => config.cache = false,
+            "--write-back" => config.write_back = true,
             // Standalone diagnostic: runs and exits, ignoring the other flags.
-            "--check-rotation" => return rotation::run(),
-            "-h" | "--help" => {
-                println!("{USAGE}");
-                return 0;
-            }
+            "--check-rotation" => return Ok(Parsed::CheckRotation),
+            "-h" | "--help" => return Ok(Parsed::Help),
             other => {
-                eprintln!("claude-usage: unknown option: {other}");
-                eprintln!("{USAGE}");
-                return 1;
+                return Err(Refusal::with_usage(format!("unknown option: {other}")));
             }
         }
     }
 
-    if no_border && !oneshot {
-        eprintln!("claude-usage: --no-border is only valid with -1");
-        eprintln!("{USAGE}");
-        return 1;
+    if config.no_border && !config.oneshot {
+        return Err(Refusal::with_usage("--no-border is only valid with -1"));
     }
 
-    if polybar_tuning && !polybar_mode {
-        eprintln!(
-            "claude-usage: --no-color, --bold-font, --colors and --interval are only valid \
-             with --polybar"
-        );
-        eprintln!("{USAGE}");
-        return 1;
+    if polybar_tuning && !config.polybar_mode {
+        return Err(Refusal::with_usage(
+            "--no-color, --bold-font, --colors and --interval are only valid with --polybar",
+        ));
     }
+
+    Ok(Parsed::Run(Box::new(config)))
+}
+
+fn real_main() -> i32 {
+    let config = match parse_args(std::env::args().skip(1)) {
+        Ok(Parsed::Run(config)) => config,
+        Ok(Parsed::Help) => {
+            println!("{USAGE}");
+            return 0;
+        }
+        Ok(Parsed::CheckRotation) => return rotation::run(),
+        Err(refusal) => {
+            eprintln!("claude-usage: {}", refusal.message);
+            if refusal.show_usage {
+                eprintln!("{USAGE}");
+            }
+            return 1;
+        }
+    };
+
+    let Config {
+        json_mode,
+        oneshot,
+        no_border,
+        polybar_mode,
+        polybar_opts,
+        polybar_interval,
+        cache_ttl,
+        cache: cache_enabled,
+        write_back,
+    } = *config;
+
+    usage_api::set_write_back(write_back);
+    cache::set_enabled(cache_enabled);
 
     // Tail mode owns its own refresh cadence (and its backoff), so it fetches
     // inside the loop rather than sharing the one-shot fetch below.
@@ -267,4 +310,158 @@ fn real_main() -> i32 {
         return 1;
     }
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<Parsed, Refusal> {
+        parse_args(args.iter().map(|a| a.to_string()))
+    }
+
+    fn config(args: &[&str]) -> Config {
+        match parse(args) {
+            Ok(Parsed::Run(config)) => *config,
+            _ => panic!("expected a runnable config for {args:?}"),
+        }
+    }
+
+    fn refusal(args: &[&str]) -> Refusal {
+        match parse(args) {
+            Err(refusal) => refusal,
+            _ => panic!("expected {args:?} to be refused"),
+        }
+    }
+
+    #[test]
+    fn defaults_are_the_live_monitor() {
+        let config = config(&[]);
+        assert!(!config.json_mode);
+        assert!(!config.oneshot);
+        assert!(!config.polybar_mode);
+        assert!(!config.write_back);
+        // Sharing is on unless it is opted out of.
+        assert!(config.cache);
+        assert_eq!(config.cache_ttl, None);
+    }
+
+    #[test]
+    fn options_take_their_value_in_either_form() {
+        for args in [
+            ["--polybar", "--interval", "300"],
+            ["--polybar", "--interval=300", ""],
+        ] {
+            let config = config(&args.into_iter().filter(|a| !a.is_empty()).collect::<Vec<_>>());
+            assert_eq!(config.polybar_interval, Some(300));
+        }
+        assert_eq!(config(&["--cache-ttl=90"]).cache_ttl, Some(90));
+        assert_eq!(
+            config(&["--polybar", "--colors=#111111,,#333333"])
+                .polybar_opts
+                .palette
+                .ok,
+            "#111111"
+        );
+    }
+
+    #[test]
+    fn polybar_options_are_recorded() {
+        let config = config(&["--polybar", "--no-color", "--bold-font", "0"]);
+        assert!(config.polybar_mode);
+        assert!(!config.polybar_opts.color);
+        assert_eq!(config.polybar_opts.bold_font, 0);
+    }
+
+    #[test]
+    fn toggles_are_recorded_in_the_config() {
+        // Recorded here, applied by real_main — the process-wide toggles they
+        // drive are not asserted on, since other tests share them.
+        assert!(config(&["--write-back"]).write_back);
+        assert!(!config(&["--no-cache"]).cache);
+    }
+
+    #[test]
+    fn no_border_is_refused_without_oneshot() {
+        let refusal = refusal(&["--no-border"]);
+        assert!(refusal.message.contains("only valid with -1"));
+        assert!(refusal.show_usage);
+        // ... and accepted with it.
+        assert!(config(&["-1", "--no-border"]).no_border);
+    }
+
+    #[test]
+    fn polybar_only_options_are_refused_on_their_own() {
+        for args in [
+            vec!["--no-color"],
+            vec!["--bold-font", "5"],
+            vec!["--colors", "#111111,#222222,#333333"],
+            vec!["--interval", "300"],
+        ] {
+            let refusal = refusal(&args);
+            assert!(
+                refusal.message.contains("only valid with --polybar"),
+                "{args:?} refused with: {}",
+                refusal.message
+            );
+            assert!(refusal.show_usage);
+        }
+    }
+
+    #[test]
+    fn the_interval_floor_is_enforced() {
+        let refusal = refusal(&["--polybar", "--interval", "5"]);
+        assert!(refusal.message.contains("below the 30s minimum"));
+        // The floor itself is fine.
+        assert_eq!(
+            config(&["--polybar", "--interval", "30"]).polybar_interval,
+            Some(30)
+        );
+    }
+
+    #[test]
+    fn bad_values_are_refused_with_the_value_quoted() {
+        for (args, expected) in [
+            (vec!["--polybar", "--interval", "abc"], "number of seconds"),
+            (vec!["--polybar", "--bold-font", "x"], "font slot number"),
+            (vec!["--cache-ttl", "soon"], "number of seconds"),
+            (vec!["--polybar", "--colors", "red,#222222,#333333"], "#rrggbb"),
+        ] {
+            let refusal = refusal(&args);
+            assert!(
+                refusal.message.contains(expected),
+                "{args:?} refused with: {}",
+                refusal.message
+            );
+            // A bad value speaks for itself; no usage dump.
+            assert!(!refusal.show_usage);
+        }
+    }
+
+    #[test]
+    fn a_missing_value_is_refused() {
+        assert!(refusal(&["--polybar", "--interval"])
+            .message
+            .contains("needs a value"));
+    }
+
+    #[test]
+    fn unknown_options_are_refused() {
+        let refusal = refusal(&["--bogus"]);
+        assert!(refusal.message.contains("unknown option: --bogus"));
+        assert!(refusal.show_usage);
+    }
+
+    #[test]
+    fn early_exit_modes_stop_the_scan() {
+        // Both are documented as ignoring whatever follows them.
+        assert!(matches!(
+            parse(&["--check-rotation", "--bogus"]),
+            Ok(Parsed::CheckRotation)
+        ));
+        assert!(matches!(parse(&["--help", "--bogus"]), Ok(Parsed::Help)));
+        assert!(matches!(parse(&["-h"]), Ok(Parsed::Help)));
+        // But an error before them still wins.
+        assert!(parse(&["--bogus", "--help"]).is_err());
+    }
 }

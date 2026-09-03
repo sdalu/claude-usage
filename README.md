@@ -98,16 +98,17 @@ cargo install --path .
 | `?`             | toggle the key cheat sheet      |
 
 The monitor also auto-refreshes on its own — every 5 minutes by default, or
-every minute after pressing `t`.
+every minute after pressing `t`. That auto-refresh goes through the shared
+cache, so a monitor open beside the polybar modules costs no extra API call;
+`r` always fetches for real. See
+[Sharing between instances](#sharing-between-instances).
 
 ## Polybar
 
 `--polybar` replaces the TUI with a single status-bar line — one compact
 segment per usage window, coloured by severity with polybar's own format tags.
 It prints that line once and exits, or, with `--interval`, keeps running and
-prints one every N seconds for a `tail = true` module (see
-[Tail vs. polybar's interval](#tail-vs-polybars-interval) — the better mode
-against a rate-limited API):
+prints one every N seconds for a `tail = true` module:
 
 ```text
 %{F#50fa7b}5h 11%%{F-} · %{T2}%{F#50fa7b}wk 39%%{F-}%{T-} · %{F#f1fa8c}Sonnet 62%%{F-}
@@ -126,6 +127,21 @@ type = custom/script
 exec = claude-usage --polybar --interval 300
 tail = true
 ```
+
+| Option                   | Effect                                                     |
+| ------------------------ | ---------------------------------------------------------- |
+| `--interval N`           | tail mode: keep running, printing a line every N seconds (minimum 30), with backoff on failure |
+| `--colors OK,WARN,CRIT`  | severity colours (default `#50fa7b,#f1fa8c,#ff5555`); an empty entry keeps that default |
+| `--bold-font N`          | font slot for the binding window (default `2`); `0` leaves it unemphasised |
+| `--no-color`             | plain text, no format tags                                  |
+
+These four are only valid with `--polybar`; `--cache-ttl` and `--no-cache`
+([Sharing between instances](#sharing-between-instances)) apply to every mode.
+Both `--opt V` and `--opt=V` are accepted.
+
+With `--no-color` (and `--bold-font 0`) the line is plain
+`5h 11% · wk 39% · Sonnet 62%`, which suits waybar, i3blocks, tmux or a shell
+prompt just as well.
 
 ### Tail vs. polybar's interval
 
@@ -153,31 +169,14 @@ exec = claude-usage --polybar
 interval = 300
 ```
 
-### Several instances share one fetch
+In one-shot mode a failed fetch becomes the line itself — `claude: Access token
+expired` in the critical colour, the message trimmed to its first clause so it
+stays bar-sized — and the exit status is still 0, so polybar keeps rendering the
+module rather than treating it as a broken script. In tail mode it shows as the
+stale marker instead, once anything has been fetched at all. Regenerate the
+example line with `cargo test polybar_line -- --nocapture`.
 
-Polybar starts a bar — and so a module process — **per monitor**, so three
-monitors would mean three processes polling a rate-limited endpoint on the same
-schedule. They don't: every instance reads and writes
-`~/.cache/claude-usage/usage.json`, and one that finds no entry younger than its
-TTL takes a lock file, fetches, and publishes the result for the others. A
-monitor (`claude-usage` with no arguments) opened alongside the bars joins the
-same pool, so it costs no extra call either.
-
-The entry stores the raw API response plus the time it was fetched, so every
-reader parses it identically and reports the true age of the data rather than
-the moment it read it. Failures are published too — three processes re-trying a
-rate limit in parallel is precisely what the cache is there to prevent — and a
-lock left behind by a killed instance is broken after 30 seconds.
-
-| Mode                       | Cache TTL                                        |
-| -------------------------- | ------------------------------------------------ |
-| `--polybar --interval N`   | just under N (90%), so the other monitors ride on one fetch |
-| `--polybar` (one-shot)     | 240s, sized for the usual `interval = 300`        |
-| TUI auto-refresh           | just under its own 5m/1m interval                 |
-| TUI `r`, `-1`, `--json`    | none — fetches fresh, and publishes it for the others |
-
-`--cache-ttl N` overrides the TTL, and `--no-cache` opts out entirely (every
-instance then fetches for itself).
+### Fonts and themed colours
 
 The bold emphasis needs a bold `font-1` in the bar itself (the tag is `%{T2}`,
 one more than the config key):
@@ -188,47 +187,57 @@ font-0 = "JetBrainsMono Nerd Font:size=10;2"
 font-1 = "JetBrainsMono Nerd Font:style=Bold:size=10;2"
 ```
 
-Options (all only valid with `--polybar`):
-
-| Option                   | Effect                                                     |
-| ------------------------ | ---------------------------------------------------------- |
-| `--interval N`           | tail mode: keep running, printing a line every N seconds (minimum 30), with backoff on failure |
-| `--colors OK,WARN,CRIT`  | severity colours (default `#50fa7b,#f1fa8c,#ff5555`); an empty entry keeps that default |
-| `--bold-font N`          | font slot for the binding window (default `2`); `0` leaves it unemphasised |
-| `--no-color`             | plain text, no format tags                                  |
-
-`--cache-ttl N` and `--no-cache` (above) are accepted in every mode, not just
-`--polybar`.
-
-One polybar gotcha if you theme the colours from your `[colors]` section:
-polybar substitutes a `${section.key}` reference only when it is the *whole*
-value, so an inline one in `exec` is passed through verbatim and the shell
-answers with `Bad substitution`. Put the call in a wrapper script that sources
-your palette instead:
+If you theme `--colors` from your own `[colors]` section, note that polybar
+substitutes a `${section.key}` reference only when it is the *whole* value: an
+inline one in `exec` is passed through verbatim and the shell answers with
+`Bad substitution`. Put the call in a wrapper script that sources your palette
+instead:
 
 ```sh
 #!/bin/sh
 . $(dirname -- "$0")/colors.sh
-exec ~/.cargo/bin/claude-usage --polybar --interval 300 \
+exec claude-usage --polybar --interval 300 \
      --bold-font 5 --colors "$green,$yellow,$red"
 ```
 
-Both `--opt V` and `--opt=V` are accepted. With `--no-color` (and
-`--bold-font 0`) the line is plain `5h 11% · wk 39% · Sonnet 62%`, which suits
-waybar, i3blocks, tmux or a shell prompt just as well.
+## Sharing between instances
 
-In one-shot mode a failed fetch becomes the line itself — `claude: Access token
-expired` in the critical colour, the message trimmed to its first clause so it
-stays bar-sized — and the exit status is still 0, so polybar keeps rendering the
-module rather than treating it as a broken script. In tail mode it shows as the
-stale marker instead, once anything has been fetched at all. Regenerate the
-example above with `cargo test polybar_line -- --nocapture`.
+Instances share one fetch, so running several costs one API call. This matters
+because the natural setup multiplies them: polybar starts a bar — and so a
+module process — **per monitor**, and a monitor (`claude-usage` with no
+arguments) opened beside the bars is one more, all polling a rate-limited
+endpoint on the same schedule.
+
+Every instance reads and writes `~/.cache/claude-usage/usage.json`. One that
+finds no entry younger than its TTL takes a lock file, fetches, and publishes
+the result for the others; an instance that finds the lock held reuses the last
+published entry rather than making the same call beside it.
+
+| Mode                       | Cache TTL                                        |
+| -------------------------- | ------------------------------------------------ |
+| `--polybar --interval N`   | just under N (90%), so the other monitors ride on one fetch |
+| `--polybar` (one-shot)     | 240s, sized for the usual `interval = 300`        |
+| TUI auto-refresh           | just under its own 5m/1m interval                 |
+| TUI `r`, `-1`, `--json`    | none — fetches fresh, and publishes it for the others |
+
+`--cache-ttl N` overrides the TTL and `--no-cache` opts out entirely (every
+instance then fetches for itself). Both work in every mode.
+
+The entry stores the raw API response plus the time it was fetched, so every
+reader parses it identically and reports the true age of the data rather than
+the moment it read it — the monitor's `updated` banner shows when the numbers
+were fetched, by whichever instance fetched them. Failures are published too:
+three processes re-trying a rate limit in parallel is precisely what the cache
+is there to prevent. A lock left behind by a killed instance is broken after 30
+seconds, and an unusable cache directory is not fatal — the instance simply
+fetches for itself.
+
 
 ## How it works
 
-On start (and on every `r`) the tool issues — unless a sibling instance has
-already published a fresh enough result, see [Several instances share one
-fetch](#several-instances-share-one-fetch):
+On start (and on every `r`) the tool issues — unless another instance has
+already published a fresh enough result, see
+[Sharing between instances](#sharing-between-instances):
 
 ```
 GET https://api.anthropic.com/api/oauth/usage
@@ -326,4 +335,8 @@ src/
 ├── cache.rs       cross-process cache: one fetch serves every instance
 ├── rotation.rs    --check-rotation: passive refresh-token rotation probe
 └── json.rs        JSON form of the usage windows
+
+docs/
+├── design.md      why it is shaped so: decisions, rejected alternatives
+└── usage-api.md   the reverse-engineered OAuth usage endpoints
 ```

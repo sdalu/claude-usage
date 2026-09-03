@@ -34,8 +34,10 @@ Errors come back as:
 { "error": { "type": "rate_limit_error", "message": "Rate limited. Please try again later." } }
 ```
 
-The usage endpoint is **rate limited**; poll gently (this tool defaults to a
-5-minute auto-refresh). A non-2xx status carries the same `error` body.
+The usage endpoint is **rate limited**; poll gently. This tool defaults to a
+5-minute auto-refresh, backs off by doubling after a failed poll, and shares one
+fetch between all its running instances — see "Sharing between instances" in the
+README. A non-2xx status carries the same `error` body.
 
 ---
 
