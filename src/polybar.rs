@@ -51,6 +51,11 @@ pub const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(240);
 /// harder will not help, and the bar keeps showing the last good numbers.
 const MAX_BACKOFF: Duration = Duration::from_secs(1800);
 
+/// Longest error notice, in characters: past this it is cut with an ellipsis,
+/// so an unexpected message (a transport error with its cause chain, the
+/// API's own prose) cannot take over the bar.
+const MAX_ERROR: usize = 40;
+
 /// Appended to the last good line while refreshes are failing.
 const STALE: &str = " \u{26a0}";
 
@@ -250,15 +255,29 @@ fn short_label(window: &LimitWindow) -> String {
     }
 }
 
-/// First clause of a fetch error, so the module stays bar-sized: the messages
-/// are written as "<summary> — <what to do>".
+/// Gist of a fetch error, so the module stays bar-sized: our own messages are
+/// written as "<summary> — <what to do>", and chained ones (ureq's
+/// "<url>: <cause>: <cause>") keep their last cause. Only the first line is
+/// used, and it is capped at `MAX_ERROR` characters.
 fn short_error(error: &str) -> String {
-    let head = error
-        .split(" \u{2014} ")
-        .next()
-        .unwrap_or(error)
-        .trim_end_matches('.');
-    sanitize(head)
+    let head = error.lines().next().unwrap_or("");
+    let head = head.split(" \u{2014} ").next().unwrap_or(head);
+    // The innermost cause says what went wrong; an HTTP status keeps its code
+    // in front, since the API's message alone can be cryptic.
+    let head = match (head.split_once(": "), head.rsplit_once(": ")) {
+        (Some((first, _)), Some((_, last))) if first.contains("HTTP ") => {
+            format!("{first}: {last}")
+        }
+        (_, Some((_, last))) => last.to_string(),
+        _ => head.to_string(),
+    };
+    let head = head.split_whitespace().collect::<Vec<_>>().join(" ");
+    let head = head.trim_end_matches('.');
+    let head = match head.char_indices().nth(MAX_ERROR) {
+        Some((cut, _)) => format!("{}\u{2026}", head[..cut].trim_end()),
+        None => head.to_string(),
+    };
+    sanitize(&head)
 }
 
 /// Neutralises polybar's `%{...}` tag opener in text that came from the API
@@ -349,6 +368,31 @@ mod tests {
         assert_eq!(
             render(&status, &Options::default()),
             "%{F#ff5555}claude: Access token expired%{F-}"
+        );
+    }
+
+    #[test]
+    fn long_error_is_cut_to_bar_size() {
+        let opts = Options {
+            color: false,
+            ..Options::default()
+        };
+        let status = Err("https://api.anthropic.com/api/oauth/usage: Dns Failed: \
+                          resolve dns name 'api.anthropic.com:443': failed to \
+                          lookup address information: Name does not resolve"
+            .to_string());
+        assert_eq!(render(&status, &opts), "claude: Name does not resolve");
+        let status = Err("HTTP 500: Internal\nserver error".to_string());
+        assert_eq!(render(&status, &opts), "claude: HTTP 500: Internal");
+        let status = Err("token refresh HTTP 400: invalid_grant".to_string());
+        assert_eq!(
+            render(&status, &opts),
+            "claude: token refresh HTTP 400: invalid_grant"
+        );
+        let status = Err("a very long single clause with no colon in it at all".to_string());
+        assert_eq!(
+            render(&status, &opts),
+            "claude: a very long single clause with no colon\u{2026}"
         );
     }
 
