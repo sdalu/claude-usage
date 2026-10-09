@@ -22,7 +22,8 @@ Usage: claude-usage [-1 [--no-border]] [--polybar [options]] [--json]
 A live monitor of your Claude plan usage windows (percent of allowance used),
 fetched from https://api.anthropic.com/api/oauth/usage using the OAuth token in
 ~/.claude/.credentials.json. An open incident on https://status.claude.com is
-called out beside the numbers, so an outage is not mistaken for your quota.
+called out beside the numbers, so an outage is not mistaken for your quota;
+in --polybar mode clicking that marker opens the incident.
 
 Options:
   -1           render the dashboard once and exit (no live updates)
@@ -60,6 +61,9 @@ Polybar options (only with --polybar):
   --colors OK,WARN,CRIT
                severity colours as #rrggbb (default #50fa7b,#f1fa8c,#ff5555);
                an empty entry keeps that default
+  --opener CMD command run when the incident marker is clicked, with
+               the incident's status-page URL appended (default: xdg-open).
+               Empty for a marker that is not clickable.
 
 Keys (interactive UI):
   q / Esc / Ctrl-C   quit
@@ -184,6 +188,13 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Parsed, Refusal>
                 config.polybar_opts.palette = polybar::Palette::parse(&raw)
                     .map_err(|e| Refusal::new(format!("--colors: {e}")))?;
             }
+            // Not validated beyond trimming: it is a command line for the
+            // user's own shell, and there is no telling what belongs in it.
+            "--opener" => {
+                let raw = value("--opener")?;
+                polybar_tuning = true;
+                config.polybar_opts.opener = raw.trim().to_string();
+            }
             "--cache-ttl" => {
                 let raw = value("--cache-ttl")?;
                 config.cache_ttl = Some(raw.parse::<u64>().map_err(|_| {
@@ -208,7 +219,8 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Parsed, Refusal>
 
     if polybar_tuning && !config.polybar_mode {
         return Err(Refusal::with_usage(
-            "--no-color, --bold-font, --colors and --interval are only valid with --polybar",
+            "--no-color, --bold-font, --colors, --opener and --interval are only \
+             valid with --polybar",
         ));
     }
 
@@ -392,6 +404,22 @@ mod tests {
         assert!(config.polybar_mode);
         assert!(!config.polybar_opts.color);
         assert_eq!(config.polybar_opts.bold_font, 0);
+        // The incident marker opens a browser unless told otherwise.
+        assert_eq!(config.polybar_opts.opener, polybar::DEFAULT_OPENER);
+    }
+
+    #[test]
+    fn the_opener_is_taken_as_written_and_can_be_emptied() {
+        assert_eq!(
+            config(&["--polybar", "--opener", "firefox --new-tab"])
+                .polybar_opts
+                .opener,
+            "firefox --new-tab"
+        );
+        // Empty means "no click action", and so does whitespace.
+        for spec in ["--opener=", "--opener=   "] {
+            assert!(config(&["--polybar", spec]).polybar_opts.opener.is_empty());
+        }
     }
 
     #[test]
@@ -418,6 +446,7 @@ mod tests {
             vec!["--no-color"],
             vec!["--bold-font", "5"],
             vec!["--colors", "#111111,#222222,#333333"],
+            vec!["--opener", "xdg-open"],
             vec!["--interval", "300"],
         ] {
             let refusal = refusal(&args);

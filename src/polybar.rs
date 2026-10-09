@@ -21,6 +21,12 @@
 //! mode appends one *after* the last good numbers, in the warning colour. They
 //! say different things — "Anthropic has a problem" versus "this line is old" —
 //! so they sit at opposite ends.
+//!
+//! The incident marker is also a click target: it carries polybar's
+//! `%{A1:…:}` action tag, so clicking the `⚠` — and only the `⚠` — opens that
+//! incident's own status-page entry. A `click-right` in the module config can
+//! only ever open the front door, because it has no way to know which incident
+//! is showing; this does, so the click lands where the reader was looking.
 
 use std::io::Write;
 use std::time::Duration;
@@ -34,6 +40,14 @@ const SEP: &str = " \u{b7} ";
 
 /// Put in front of the line while the status page lists an open incident.
 const INCIDENT: &str = "\u{26a0}";
+
+/// Where the incident marker's click goes when the incident carries no
+/// shortlink of its own, or one that did not survive [`is_safe_url`].
+const STATUS_PAGE: &str = "https://status.claude.com/";
+
+/// Command the incident marker's click runs, the URL appended. `xdg-open`
+/// because it is what a desktop already has wired to a browser.
+pub const DEFAULT_OPENER: &str = "xdg-open";
 
 /// Polybar font slot used for the binding window; `font-1` in the bar config
 /// (slots are 1-based in the tag, 0-based in the config key). 0 disables it.
@@ -116,6 +130,9 @@ pub struct Options {
     /// Font slot for the binding window, or 0 for no emphasis.
     pub bold_font: u8,
     pub palette: Palette,
+    /// Command the incident marker's click runs, with the incident's URL
+    /// appended. Empty for a marker that is not clickable.
+    pub opener: String,
 }
 
 impl Default for Options {
@@ -124,6 +141,7 @@ impl Default for Options {
             color: true,
             bold_font: DEFAULT_BOLD_FONT,
             palette: Palette::default(),
+            opener: DEFAULT_OPENER.to_string(),
         }
     }
 }
@@ -144,9 +162,9 @@ pub fn render(status: &Result<UsageStatus, String>, opts: &Options) -> String {
 }
 
 /// The module line, with a warning marker in front of it while the status page
-/// lists an open incident (coloured by the worst one's impact). Nothing is
-/// added when there is none — or when the page could not be checked, which is
-/// unknown rather than bad news.
+/// lists an open incident (coloured by the worst one's impact, and clicking
+/// through to that incident). Nothing is added when there is none — or when the
+/// page could not be checked, which is unknown rather than bad news.
 pub fn render_line(
     status: &Result<UsageStatus, String>,
     incidents: Option<&Incidents>,
@@ -154,9 +172,39 @@ pub fn render_line(
 ) -> String {
     let line = render(status, opts);
     match incidents.and_then(Incidents::worst) {
-        Some(worst) => format!("{} {line}", opts.paint(INCIDENT, worst.impact.level())),
+        Some(worst) => {
+            let marker = opts.paint(INCIDENT, worst.impact.level());
+            let marker = opts.on_left_click(&marker, incident_url(worst.url.as_deref()));
+            format!("{marker} {line}")
+        }
         None => line,
     }
+}
+
+/// Where the incident marker's click goes: the incident's own status-page
+/// shortlink when the reply carried a usable one, else the page front door.
+fn incident_url(url: Option<&str>) -> &str {
+    match url {
+        Some(url) if is_safe_url(url) => url,
+        _ => STATUS_PAGE,
+    }
+}
+
+/// Whether a shortlink is fit to hand to polybar. Narrow on purpose: the value
+/// arrives over the network and ends up inside a command a shell will run, so
+/// the test is "a plain https URL of printable characters", not "parses as a
+/// URL". Everything else falls back to [`STATUS_PAGE`], which loses the deep
+/// link and nothing else.
+fn is_safe_url(url: &str) -> bool {
+    url.starts_with("https://")
+        && url.len() <= 300
+        // No spaces, no control characters, nothing needing an encoding guess.
+        && url.chars().all(|c| c.is_ascii_graphic())
+        // Quoting in the command keeps the shell out of it; these three are the
+        // characters that would escape the quoting or polybar's tag syntax.
+        && !url.contains('\'')
+        && !url.contains('{')
+        && !url.contains('}')
 }
 
 /// Tail mode: one long-lived process printing a line per refresh for a polybar
@@ -305,6 +353,29 @@ impl Options {
         }
         format!("%{{T{}}}{text}%{{T-}}", self.bold_font)
     }
+
+    /// Wraps `text` in polybar's left-click action tag, so a click on that
+    /// stretch of the line — and only that stretch — runs the opener on `url`.
+    /// Dropped along with the colours in plain-text mode, since the tag is
+    /// polybar's own syntax and means nothing to waybar, tmux or a shell
+    /// prompt; dropped too when the opener has been emptied.
+    fn on_left_click(&self, text: &str, url: &str) -> String {
+        if !self.color || self.opener.is_empty() {
+            return text.to_string();
+        }
+        // Single-quoted because polybar hands the command to a shell and the
+        // URL came off the network; is_safe_url has already refused any URL
+        // carrying a quote of its own. The opener is the caller's own string,
+        // so it is left as written — `firefox --new-tab` has to keep working.
+        let command = escape_action(&format!("{} '{url}'", self.opener));
+        format!("%{{A1:{command}:}}{text}%{{A}}")
+    }
+}
+
+/// Escapes a command for polybar's action tag, which ends the command at the
+/// first unescaped `:` — and every URL has one immediately after its scheme.
+fn escape_action(command: &str) -> String {
+    command.replace(':', "\\:")
 }
 
 #[cfg(test)]
@@ -464,12 +535,27 @@ mod tests {
         .unwrap()
     }
 
+    /// One open incident carrying the status page's own deep link to it.
+    fn incident_linked(shortlink: &str) -> Incidents {
+        crate::incidents::parse(&format!(
+            r#"{{"incidents":[{{"name":"Elevated errors","status":"investigating",
+                "impact":"major","shortlink":"{shortlink}"}}]}}"#
+        ))
+        .unwrap()
+    }
+
+    /// Colours and position, with the click tag out of the way.
+    fn quiet() -> Options {
+        Options {
+            bold_font: 0,
+            opener: String::new(),
+            ..Options::default()
+        }
+    }
+
     #[test]
     fn an_open_incident_is_flagged_in_front() {
-        let opts = Options {
-            bold_font: 0,
-            ..Options::default()
-        };
+        let opts = quiet();
         let status = usage_api::parse(SAMPLE);
         // A major incident takes the critical colour ...
         let line = render_line(&status, Some(&incidents("major")), &opts);
@@ -480,6 +566,109 @@ mod tests {
         // ... a minor one the warning colour.
         let line = render_line(&status, Some(&incidents("minor")), &opts);
         assert!(line.starts_with("%{F#f1fa8c}\u{26a0}%{F-} "), "{line}");
+    }
+
+    #[test]
+    fn clicking_the_marker_opens_that_incident() {
+        let opts = Options {
+            bold_font: 0,
+            ..Options::default()
+        };
+        let status = usage_api::parse(SAMPLE);
+        let open = incident_linked("https://stspg.io/9xz4hh");
+        let line = render_line(&status, Some(&open), &opts);
+        // The action wraps the marker alone: the tag closes before the numbers.
+        assert!(
+            line.starts_with(
+                "%{A1:xdg-open 'https\\://stspg.io/9xz4hh':}\
+                 %{F#ff5555}\u{26a0}%{F-}%{A} %{F#50fa7b}5h 11%"
+            ),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn the_scheme_colon_is_escaped_for_polybars_tag_parser() {
+        // Unescaped, polybar would end the command at "xdg-open 'https".
+        let opts = Options::default();
+        let line = render_line(
+            &usage_api::parse(SAMPLE),
+            Some(&incident_linked("https://stspg.io/x")),
+            &opts,
+        );
+        assert!(line.contains("https\\://stspg.io/x"), "{line}");
+        assert!(!line.contains("'https://"), "{line}");
+    }
+
+    #[test]
+    fn an_incident_with_no_link_falls_back_to_the_front_door() {
+        assert_eq!(incident_url(None), STATUS_PAGE);
+        let line = render_line(
+            &usage_api::parse(SAMPLE),
+            Some(&incidents("major")),
+            &Options::default(),
+        );
+        assert!(
+            line.starts_with("%{A1:xdg-open 'https\\://status.claude.com/':}"),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn a_shortlink_that_could_break_out_is_not_passed_on() {
+        for hostile in [
+            // Closes the quote and appends a command.
+            "https://stspg.io/x'; rm -rf ~; echo '",
+            // Opens a polybar tag inside the action's own command.
+            "https://stspg.io/%{F#ff0000}",
+            // Not https, so not the status page.
+            "http://stspg.io/x",
+            "javascript:alert(1)",
+            // Whitespace would split the command; control characters, worse.
+            "https://stspg.io/x y",
+            "https://stspg.io/x\n",
+        ] {
+            assert!(!is_safe_url(hostile), "{hostile}");
+            assert_eq!(incident_url(Some(hostile)), STATUS_PAGE, "{hostile}");
+        }
+        // The real shape still gets through.
+        assert!(is_safe_url("https://stspg.io/9xz4hhmd1jzn"));
+    }
+
+    #[test]
+    fn plain_text_carries_no_action_tag() {
+        let opts = Options {
+            color: false,
+            bold_font: 0,
+            ..Options::default()
+        };
+        let line = render_line(
+            &usage_api::parse(SAMPLE),
+            Some(&incident_linked("https://stspg.io/x")),
+            &opts,
+        );
+        assert_eq!(line, "\u{26a0} 5h 11% \u{b7} wk 39% \u{b7} Sonnet 62%");
+    }
+
+    #[test]
+    fn an_empty_opener_leaves_the_marker_unclickable() {
+        let line = render_line(
+            &usage_api::parse(SAMPLE),
+            Some(&incident_linked("https://stspg.io/x")),
+            &quiet(),
+        );
+        assert!(!line.contains("%{A"), "{line}");
+        assert!(line.starts_with("%{F#ff5555}\u{26a0}%{F-} "), "{line}");
+    }
+
+    #[test]
+    fn the_stale_marker_is_not_a_click_target() {
+        // "this line is old" is not something the status page can answer.
+        let previous = usage_api::parse(SAMPLE).unwrap();
+        let open = incident_linked("https://stspg.io/x");
+        let line = stale(&previous, Some(&open), &Options::default());
+        assert_eq!(line.matches("%{A1:").count(), 1, "{line}");
+        assert!(line.ends_with("%{F#f1fa8c} \u{26a0}%{F-}"), "{line}");
     }
 
     #[test]

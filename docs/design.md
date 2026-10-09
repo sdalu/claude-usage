@@ -156,6 +156,33 @@ own grading; `major` and `critical` are shown in the critical colour, `minor`
 and `none` as a warning. Mapping it rather than parsing the incident text keeps
 the rule stable across wording.
 
+**Why the bar's marker carries its own click, rather than leaving it to the
+module config.** A `click-right` in `[module/claude]` can only ever open the
+status page's front door: polybar does not know which incident is showing, so
+it cannot link to it. The tool does — the `shortlink` is in the same reply the
+marker came from — so it emits polybar's `%{A1:…:}` action around the `⚠`
+alone, and the click lands on the incident the reader was looking at.
+
+It takes the *left* button, and the two choices are related: scoped to the
+glyph and bound to the button a marker invites, it leaves the right button and
+the rest of the line to the module's own `click-right`, which is the only route
+to the page when there is no incident and so no marker to click. The two
+compose rather than compete.
+
+**Why the URL is quoted and screened.** The action's command reaches a shell,
+and the URL arrives over the network, so the two layers between them each get
+their own defence: the URL is single-quoted, and `is_safe_url` refuses anything
+that could leave those quotes or confuse polybar's tag parser — a quote, a
+brace, a space, a control character, a scheme other than `https`. A refused
+shortlink degrades to the front door rather than failing, because the fallback
+is a strictly better answer than an unclickable marker. The scheme's own colon
+is then escaped (`https\://`), which polybar requires: it ends the command at
+the first bare `:`, which would otherwise be the one after `https`.
+
+**Why the stale marker is not clickable.** "This line is old" is not a question
+the status page answers. It is the same glyph, so the asymmetry is deliberate
+and worth stating: the click follows the meaning, not the character.
+
 ## Testing the refusals
 
 Parsing is a pure function (`parse_args` → a `Config`, a `Refusal`, or one of

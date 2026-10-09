@@ -82,6 +82,9 @@ display. `--no-incidents` turns the check off (no marker, no request to the
 status page). Regenerate the capture with
 `cargo test open_incident -- --nocapture`.
 
+In `--polybar` mode the marker is also a click target that opens the
+incident itself — see [Polybar](#polybar).
+
 ## Build & run
 
 Requires a Rust toolchain (1.74+). Install via <https://rustup.rs> if needed.
@@ -155,9 +158,32 @@ warning colour otherwise:
 
 so the bar reads `⚠ 5h 11% · wk 39% · Sonnet 62%`. The tail-mode stale marker
 (below) goes *after* the line; the two say different things — "Anthropic has a
-problem" versus "this line is old" — so they sit at opposite ends. A
-`click-right = xdg-open https://status.claude.com/` on the module makes the
-page one click away.
+problem" versus "this line is old" — so they sit at opposite ends.
+
+**Left-clicking the `⚠` opens that incident.** The marker is wrapped in
+polybar's own action tag, carrying the status page's deep link to the incident
+being shown:
+
+```text
+%{A1:xdg-open 'https\://stspg.io/9xz4hhmd1jzn':}%{F#ff5555}⚠%{F-}%{A} %{F#50fa7b}5h 11%%{F-} · …
+```
+
+Only the `⚠` is the target: the tag closes before the numbers, so a left-click
+anywhere else on the module is not caught. It is on the left button because
+that is the one a marker invites, which leaves the right free for a module-wide
+`click-right` — worth keeping, since it is the only route to the page when
+there is no incident and so no marker to click:
+
+```ini
+click-right = xdg-open https://status.claude.com/
+```
+
+`--opener CMD` chooses what runs (default `xdg-open`, the URL appended and
+single-quoted); `--opener=` leaves the marker unclickable, as does
+`--no-color`, since the tag is polybar's syntax and means nothing to waybar or
+a shell prompt. An incident whose `shortlink` is missing — or is anything but a
+plain `https://` URL of printable characters — falls back to
+<https://status.claude.com/>: the deep link is lost, the click is not.
 
 ```ini
 [module/claude]
@@ -171,9 +197,10 @@ tail = true
 | `--interval N`           | tail mode: keep running, printing a line every N seconds (minimum 30), with backoff on failure |
 | `--colors OK,WARN,CRIT`  | severity colours (default `#50fa7b,#f1fa8c,#ff5555`); an empty entry keeps that default |
 | `--bold-font N`          | font slot for the binding window (default `2`); `0` leaves it unemphasised |
-| `--no-color`             | plain text, no format tags                                  |
+| `--no-color`             | plain text, no format tags (and so no click action)         |
+| `--opener CMD`           | command the incident marker's left-click runs, the incident's URL appended (default `xdg-open`); empty for no click |
 
-These four are only valid with `--polybar`; `--cache-ttl` and `--no-cache`
+These five are only valid with `--polybar`; `--cache-ttl` and `--no-cache`
 ([Sharing between instances](#sharing-between-instances)) and `--no-incidents`
 ([Open incidents](#open-incidents)) apply to every mode.
 Both `--opt V` and `--opt=V` are accepted.
