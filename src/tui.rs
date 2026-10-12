@@ -145,8 +145,8 @@ impl App {
 
     /// Returns true when the app should quit.
     fn handle_key(&mut self, key: KeyEvent) -> bool {
-        let ctrl_c = key.code == KeyCode::Char('c')
-            && key.modifiers.contains(KeyModifiers::CONTROL);
+        let ctrl_c =
+            key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
 
         // While help is open, any key dismisses it (q / Ctrl-C still quit).
         if self.show_help {
@@ -241,9 +241,8 @@ impl App {
     }
 
     fn draw(&mut self, f: &mut Frame) {
-        let chunks =
-            Layout::vertical([Constraint::Length(self.box_height()), Constraint::Min(0)])
-                .split(f.area());
+        let chunks = Layout::vertical([Constraint::Length(self.box_height()), Constraint::Min(0)])
+            .split(f.area());
 
         self.draw_windows(f, chunks[0]);
         if self.show_help {
@@ -302,8 +301,7 @@ impl App {
                     _ => Color::Yellow,
                 };
                 block = block.title(
-                    Line::from(Span::styled(alert, Style::new().fg(color).bold()))
-                        .right_aligned(),
+                    Line::from(Span::styled(alert, Style::new().fg(color).bold())).right_aligned(),
                 );
             }
         }
@@ -334,10 +332,7 @@ impl App {
                 .error
                 .clone()
                 .unwrap_or_else(|| "no active limits reported".to_string());
-            f.render_widget(
-                Paragraph::new(Span::styled(msg, Style::new().red())),
-                inner,
-            );
+            f.render_widget(Paragraph::new(Span::styled(msg, Style::new().red())), inner);
             return;
         }
 
@@ -374,7 +369,14 @@ impl App {
 
         for (gauge, row) in self.views.windows.iter().zip(rows.iter()) {
             render_gauge_row(
-                f, *row, gauge, name_width, text_width, drop_resets, drop_used, self.border,
+                f,
+                *row,
+                gauge,
+                name_width,
+                text_width,
+                drop_resets,
+                drop_used,
+                self.border,
             );
         }
     }
@@ -552,7 +554,10 @@ fn render_gauge_row(
     // Aligned trailing text: " NN% used · $… · resets …".
     let mut spans = vec![
         Span::raw(" "),
-        Span::styled(percent_text(gauge.percent, drop_used), Style::new().fg(color)),
+        Span::styled(
+            percent_text(gauge.percent, drop_used),
+            Style::new().fg(color),
+        ),
     ];
     if !gauge.dollars.is_empty() {
         spans.push(Span::raw(" \u{b7} "));

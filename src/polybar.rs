@@ -486,7 +486,10 @@ mod tests {
         let body = r#"{"limits":[{"kind":"session","group":"session","percent":30,
             "severity":"normal","scope":null,"is_active":false}],
             "spend":{"enabled":true,"percent":12.0,"severity":"normal"}}"#;
-        assert_eq!(render(&usage_api::parse(body), &opts), "5h 30% \u{b7} $ 12%");
+        assert_eq!(
+            render(&usage_api::parse(body), &opts),
+            "5h 30% \u{b7} $ 12%"
+        );
     }
 
     #[test]
@@ -510,7 +513,10 @@ mod tests {
         assert_eq!(backoff(interval, 2), Duration::from_secs(1200));
         // Capped, and never shorter than the interval however far it is pushed.
         assert_eq!(backoff(interval, 9), MAX_BACKOFF);
-        assert_eq!(backoff(Duration::from_secs(3600), 9), Duration::from_secs(3600));
+        assert_eq!(
+            backoff(Duration::from_secs(3600), 9),
+            Duration::from_secs(3600)
+        );
     }
 
     #[test]

@@ -41,8 +41,7 @@ const RATE_LIMITED: &str = "Rate limited by the usage API \u{2014} wait a moment
 
 /// Shown when the access token has expired and write-back is off (the default).
 /// Kept under 70 characters so it fits a narrow window.
-const TOKEN_EXPIRED: &str =
-    "Access token expired \u{2014} run Claude Code, or pass --write-back.";
+const TOKEN_EXPIRED: &str = "Access token expired \u{2014} run Claude Code, or pass --write-back.";
 
 /// When true, an expired access token is refreshed and the rotated credentials
 /// written back to the file. Off by default so the tool never modifies the
@@ -153,8 +152,8 @@ pub(crate) fn credentials_path() -> Result<PathBuf, String> {
 /// stored token if the refresh itself fails.
 fn read_token() -> Result<String, String> {
     let path = credentials_path()?;
-    let text = std::fs::read_to_string(&path)
-        .map_err(|e| format!("reading {}: {e}", path.display()))?;
+    let text =
+        std::fs::read_to_string(&path).map_err(|e| format!("reading {}: {e}", path.display()))?;
     let mut json: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
 
     let oauth = json
@@ -256,10 +255,7 @@ fn parse_refresh(body: &str) -> Result<RefreshedTokens, String> {
         .get("refresh_token")
         .and_then(Value::as_str)
         .map(String::from);
-    let expires_in = value
-        .get("expires_in")
-        .and_then(Value::as_i64)
-        .unwrap_or(0);
+    let expires_in = value.get("expires_in").and_then(Value::as_i64).unwrap_or(0);
     Ok(RefreshedTokens {
         access,
         refresh: refresh.unwrap_or_default(),
@@ -322,10 +318,7 @@ fn http_get(url: &str, token: &str) -> Result<String, String> {
 
 fn error_message(body: &str) -> Option<String> {
     let v: Value = serde_json::from_str(body).ok()?;
-    v.get("error")?
-        .get("message")?
-        .as_str()
-        .map(String::from)
+    v.get("error")?.get("message")?.as_str().map(String::from)
 }
 
 pub fn parse(body: &str) -> Result<UsageStatus, String> {
@@ -426,7 +419,11 @@ fn top_level_key(entry: &Value) -> Option<String> {
 
 fn spend_window(root: &Value) -> Option<LimitWindow> {
     let spend = root.get("spend")?;
-    if !spend.get("enabled").and_then(Value::as_bool).unwrap_or(false) {
+    if !spend
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
         return None;
     }
     Some(LimitWindow {

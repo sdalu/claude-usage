@@ -76,7 +76,10 @@ fn report(prev: &Snapshot, current: &Snapshot, path: &std::path::Path) -> i32 {
     }
     if current.expires_at != prev.expires_at {
         println!("No rotation: a refresh happened but the refresh token is unchanged.");
-        println!("  refresh fp : {:016x} (stable across the refresh)", current.refresh_fp);
+        println!(
+            "  refresh fp : {:016x} (stable across the refresh)",
+            current.refresh_fp
+        );
         println!(
             "  expiry moved {} -> {}",
             fmt_expiry(prev.expires_at),
@@ -97,8 +100,8 @@ fn report(prev: &Snapshot, current: &Snapshot, path: &std::path::Path) -> i32 {
 
 fn read_snapshot() -> Result<Snapshot, String> {
     let path = usage_api::credentials_path()?;
-    let text = std::fs::read_to_string(&path)
-        .map_err(|e| format!("reading {}: {e}", path.display()))?;
+    let text =
+        std::fs::read_to_string(&path).map_err(|e| format!("reading {}: {e}", path.display()))?;
     let json: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
     let oauth = json
         .get("claudeAiOauth")

@@ -385,7 +385,12 @@ mod tests {
             ["--polybar", "--interval", "300"],
             ["--polybar", "--interval=300", ""],
         ] {
-            let config = config(&args.into_iter().filter(|a| !a.is_empty()).collect::<Vec<_>>());
+            let config = config(
+                &args
+                    .into_iter()
+                    .filter(|a| !a.is_empty())
+                    .collect::<Vec<_>>(),
+            );
             assert_eq!(config.polybar_interval, Some(300));
         }
         assert_eq!(config(&["--cache-ttl=90"]).cache_ttl, Some(90));
@@ -476,7 +481,10 @@ mod tests {
             (vec!["--polybar", "--interval", "abc"], "number of seconds"),
             (vec!["--polybar", "--bold-font", "x"], "font slot number"),
             (vec!["--cache-ttl", "soon"], "number of seconds"),
-            (vec!["--polybar", "--colors", "red,#222222,#333333"], "#rrggbb"),
+            (
+                vec!["--polybar", "--colors", "red,#222222,#333333"],
+                "#rrggbb",
+            ),
         ] {
             let refusal = refusal(&args);
             assert!(

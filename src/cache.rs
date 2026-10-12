@@ -208,8 +208,7 @@ fn publish(dir: &Path, name: &str, body: &Result<String, String>, at_ms: i64) {
     };
     // Write-then-rename, so a reader never sees a half-written entry.
     let tmp = dir.join(format!("{name}.json.{}", std::process::id()));
-    if std::fs::write(&tmp, text).is_ok() && std::fs::rename(&tmp, entry_path(dir, name)).is_err()
-    {
+    if std::fs::write(&tmp, text).is_ok() && std::fs::rename(&tmp, entry_path(dir, name)).is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
 }
