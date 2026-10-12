@@ -328,7 +328,8 @@ impl Options {
     }
 
     fn embolden(&self, text: &str) -> String {
-        if self.bold_font == 0 {
+        // The font tag is polybar markup like the colours: plain text has none.
+        if !self.color || self.bold_font == 0 {
             return text.to_string();
         }
         format!("%{{T{}}}{text}%{{T-}}", self.bold_font)
@@ -391,13 +392,17 @@ mod tests {
 
     #[test]
     fn plain_line_has_no_tags() {
-        let opts = Options {
-            color: false,
-            bold_font: 0,
-            ..Options::default()
-        };
-        let line = render(&usage_api::parse(SAMPLE), &opts);
-        assert_eq!(line, "5h 11% \u{b7} wk 39% \u{b7} Sonnet 62%");
+        // The font slot left at its default (and set explicitly): --no-color
+        // alone has to drop the binding window's font tag too.
+        for bold_font in [DEFAULT_BOLD_FONT, 5] {
+            let opts = Options {
+                color: false,
+                bold_font,
+                ..Options::default()
+            };
+            let line = render(&usage_api::parse(SAMPLE), &opts);
+            assert_eq!(line, "5h 11% \u{b7} wk 39% \u{b7} Sonnet 62%");
+        }
     }
 
     /// A usage reply whose windows reset at times relative to now, so the
@@ -434,14 +439,10 @@ mod tests {
 
     #[test]
     fn binding_window_is_emboldened() {
-        let opts = Options {
-            color: false,
-            ..Options::default()
-        };
-        let line = render(&usage_api::parse(SAMPLE), &opts);
-        assert!(line.contains("%{T2}wk 39%%{T-}"));
+        let line = render(&usage_api::parse(SAMPLE), &Options::default());
+        assert!(line.contains("%{T2}%{F#50fa7b}wk 39%%{F-}%{T-}"), "{line}");
         // Only the binding window is.
-        assert!(!line.contains("%{T2}5h"));
+        assert_eq!(line.matches("%{T2}").count(), 1, "{line}");
     }
 
     #[test]

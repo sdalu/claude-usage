@@ -234,7 +234,7 @@ These five are only valid with `--polybar`; `--cache-ttl` and `--no-cache`
 ([Open incidents](#open-incidents)) apply to every mode.
 Both `--opt V` and `--opt=V` are accepted.
 
-With `--no-color` (and `--bold-font 0`) the line is plain
+With `--no-color` the line is plain — no colour, font or click tags —
 `5h 11% · wk 39% · Sonnet 62%`, which suits waybar, i3blocks, tmux or a shell
 prompt just as well.
 
