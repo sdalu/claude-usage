@@ -140,15 +140,19 @@ pub fn fetch() -> Result<Incidents, String> {
 /// The raw status-page reply. Separate from [`fetch`] for the same reason as
 /// `usage_api::fetch_raw`: the shared cache stores exactly what the page said.
 pub fn fetch_raw() -> Result<String, String> {
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(Duration::from_secs(5))
-        .timeout_read(Duration::from_secs(6))
-        .build();
-    match agent.get(URL).set("User-Agent", "claude-usage-rs").call() {
-        Ok(response) => response.into_string().map_err(|e| e.to_string()),
-        Err(ureq::Error::Status(code, _)) => Err(format!("status page HTTP {code}")),
-        Err(e) => Err(e.to_string()),
+    let mut response = crate::usage_api::agent(Duration::from_secs(6))
+        .get(URL)
+        .header("User-Agent", "claude-usage-rs")
+        .call()
+        .map_err(|e| e.to_string())?;
+    let code = response.status().as_u16();
+    if !(200..300).contains(&code) {
+        return Err(format!("status page HTTP {code}"));
     }
+    response
+        .body_mut()
+        .read_to_string()
+        .map_err(|e| e.to_string())
 }
 
 pub fn parse(body: &str) -> Result<Incidents, String> {

@@ -10,7 +10,7 @@ use ratatui::{
     backend::TestBackend,
     buffer::Buffer,
     layout::{Constraint, Layout, Rect},
-    style::{Color, Modifier, Style, Stylize},
+    style::{Color, Modifier, Style},
     symbols,
     text::{Line, Span},
     widgets::{Block, Borders, Clear, LineGauge, Padding, Paragraph},
@@ -105,8 +105,9 @@ impl App {
             .map(|(w, _)| w)
             .unwrap_or(80)
             .max(40);
-        let mut terminal = Terminal::new(TestBackend::new(width, self.box_height()))?;
-        terminal.draw(|f| self.draw(f))?;
+        // A TestBackend cannot fail: its error type is Infallible.
+        let Ok(mut terminal) = Terminal::new(TestBackend::new(width, self.box_height()));
+        let Ok(_) = terminal.draw(|f| self.draw(f));
         print!(
             "{}",
             buffer_to_ansi(terminal.backend().buffer(), self.link.as_ref())
@@ -605,7 +606,8 @@ fn render_gauge_row(
     // Progress bar.
     let bar = LineGauge::default()
         .ratio(gauge.ratio)
-        .line_set(symbols::line::THICK)
+        .filled_symbol(symbols::line::THICK.horizontal)
+        .unfilled_symbol(symbols::line::THICK.horizontal)
         .filled_style(Style::new().fg(color))
         .unfilled_style(Style::new().dark_gray())
         .label("");

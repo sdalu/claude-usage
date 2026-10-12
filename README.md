@@ -101,7 +101,7 @@ link. In `--polybar` mode the marker is a click target too — see
 
 ## Build & run
 
-Requires a Rust toolchain (1.74+). Install via <https://rustup.rs> if needed.
+Requires a Rust toolchain (1.88+). Install via <https://rustup.rs> if needed.
 
 ```sh
 cargo run --release                  # launch the monitor

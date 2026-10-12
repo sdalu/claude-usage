@@ -232,32 +232,29 @@ struct RefreshedTokens {
 /// endpoint. Anthropic rotates refresh tokens, so the response's refresh token
 /// must replace the stored one.
 fn refresh_token(refresh: &str) -> Result<RefreshedTokens, String> {
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(Duration::from_secs(5))
-        .timeout_read(Duration::from_secs(10))
-        .build();
+    let agent = agent(Duration::from_secs(10));
     let body = json!({
         "grant_type": "refresh_token",
         "refresh_token": refresh,
         "client_id": OAUTH_CLIENT_ID,
     });
-    let response = match agent
+    let mut response = agent
         .post(OAUTH_TOKEN_URL)
-        .set("Content-Type", "application/json")
-        .set("User-Agent", "claude-usage-rs")
+        .header("Content-Type", "application/json")
+        .header("User-Agent", "claude-usage-rs")
         .send_json(body)
-    {
-        Ok(response) => response,
-        Err(ureq::Error::Status(code, response)) => {
-            let body = response.into_string().unwrap_or_default();
-            return Err(match error_message(&body) {
-                Some(msg) => format!("token refresh HTTP {code}: {msg}"),
-                None => format!("token refresh HTTP {code}"),
-            });
-        }
-        Err(e) => return Err(e.to_string()),
-    };
-    let text = response.into_string().map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())?;
+    let code = response.status().as_u16();
+    let text = response
+        .body_mut()
+        .read_to_string()
+        .map_err(|e| e.to_string())?;
+    if !(200..300).contains(&code) {
+        return Err(match error_message(&text) {
+            Some(msg) => format!("token refresh HTTP {code}: {msg}"),
+            None => format!("token refresh HTTP {code}"),
+        });
+    }
     parse_refresh(&text)
 }
 
@@ -311,30 +308,45 @@ fn write_credentials(path: &std::path::Path, json: &Value) -> Result<(), String>
 }
 
 fn http_get(url: &str, token: &str) -> Result<String, String> {
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(Duration::from_secs(5))
-        .timeout_read(Duration::from_secs(6))
-        .build();
-    let request = agent
+    let mut response = agent(Duration::from_secs(6))
         .get(url)
-        .set("Authorization", &format!("Bearer {token}"))
-        .set("anthropic-beta", OAUTH_BETA)
-        .set("Content-Type", "application/json")
-        .set("User-Agent", "claude-usage-rs");
-    match request.call() {
-        Ok(response) => response.into_string().map_err(|e| e.to_string()),
-        // Rate limiting is common enough to warrant a friendly message.
-        Err(ureq::Error::Status(429, _)) => Err(RATE_LIMITED.to_string()),
-        // Otherwise surface the API's own message on a non-2xx status.
-        Err(ureq::Error::Status(code, response)) => {
-            let body = response.into_string().unwrap_or_default();
-            Err(match error_message(&body) {
-                Some(msg) => format!("HTTP {code}: {msg}"),
-                None => format!("HTTP {code}"),
-            })
-        }
-        Err(e) => Err(e.to_string()),
+        .header("Authorization", &format!("Bearer {token}"))
+        .header("anthropic-beta", OAUTH_BETA)
+        .header("Content-Type", "application/json")
+        .header("User-Agent", "claude-usage-rs")
+        .call()
+        .map_err(|e| e.to_string())?;
+    let code = response.status().as_u16();
+    // Rate limiting is common enough to warrant a friendly message.
+    if code == 429 {
+        return Err(RATE_LIMITED.to_string());
     }
+    let body = response
+        .body_mut()
+        .read_to_string()
+        .map_err(|e| e.to_string())?;
+    if (200..300).contains(&code) {
+        return Ok(body);
+    }
+    // Otherwise surface the API's own message on a non-2xx status.
+    Err(match error_message(&body) {
+        Some(msg) => format!("HTTP {code}: {msg}"),
+        None => format!("HTTP {code}"),
+    })
+}
+
+/// An HTTP agent with a 5-second connect timeout and `read` to wait for the
+/// response and again for its body. A non-2xx status comes back as a response
+/// rather than an error, so its body — the API's own error message — can still
+/// be read.
+pub(crate) fn agent(read: Duration) -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_connect(Some(Duration::from_secs(5)))
+        .timeout_recv_response(Some(read))
+        .timeout_recv_body(Some(read))
+        .http_status_as_error(false)
+        .build()
+        .into()
 }
 
 fn error_message(body: &str) -> Option<String> {
