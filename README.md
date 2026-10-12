@@ -10,8 +10,9 @@ the numbers — an outage is then not mistaken for your own quota. See
 
 The data comes entirely from Anthropic's usage API; the tool does **not** read
 the Claude CLI session logs or any other CLI byproduct. Its only local
-dependency is the OAuth token in `~/.claude/.credentials.json`, which is needed
-to authenticate the request. By default this file is treated as **read-only**:
+dependency is the OAuth token in `~/.claude/.credentials.json` (or in
+`CLAUDE_CODE_OAUTH_TOKEN`, see [Credential refresh](#credential-refresh)),
+which is needed to authenticate the request. By default this file is treated as **read-only**:
 when the access token has expired the tool just reports it and waits for Claude
 Code to refresh it. Pass `--write-back` to let the tool refresh the token itself
 and write the rotated credentials back. See
@@ -380,6 +381,15 @@ The one caveat with `--write-back`: the tool and Claude Code then both write the
 same file, so if Anthropic *rotates* the refresh token, a simultaneous refresh
 could be raced. Whether that rotation happens is account-specific — use
 `--check-rotation` (below) to find out before relying on `--write-back`.
+
+**`CLAUDE_CODE_OAUTH_TOKEN`.** When this environment variable is set (and not
+blank), its value is the token, as it is for Claude Code itself — typically a
+long-lived one from `claude setup-token`, for a machine with no credentials
+file. The file is then not read at all: there is no `expiresAt` to check and
+no refresh token, so `--write-back` has nothing to do, and an expired or
+revoked token shows as the API's own error. Whether a `setup-token` token
+carries the scope the usage endpoint asks for is the API's to decide; if it
+does not, that is the error you will see.
 
 ### `--check-rotation`
 

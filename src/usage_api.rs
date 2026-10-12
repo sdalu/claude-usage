@@ -1,6 +1,7 @@
 //! Live rate-limit utilization from the same source as Claude Code's `/status`:
 //! `GET https://api.anthropic.com/api/oauth/usage`, authorized with the OAuth
-//! token in `~/.claude/.credentials.json`.
+//! token in `~/.claude/.credentials.json` — or, when `CLAUDE_CODE_OAUTH_TOKEN`
+//! is set, with that token instead (see [`ENV_TOKEN`]).
 //!
 //! This is the tool's only data source. It does not read the Claude CLI session
 //! logs (or any other CLI byproduct) — only the OAuth token from the
@@ -31,6 +32,13 @@ const OAUTH_BETA: &str = "oauth-2025-04-20";
 /// fresh access token. The client id is the public Claude Code OAuth client.
 const OAUTH_TOKEN_URL: &str = "https://console.anthropic.com/v1/oauth/token";
 const OAUTH_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+
+/// Environment variable carrying an OAuth access token, the one Claude Code
+/// itself honours (a long-lived token from `claude setup-token`, typically).
+/// When set and non-empty it is used as-is and the credentials file is not
+/// read: there is no expiry to check and no refresh token to rotate, so
+/// `--write-back` has nothing to act on.
+pub const ENV_TOKEN: &str = "CLAUDE_CODE_OAUTH_TOKEN";
 
 /// Refresh this many milliseconds before the stated expiry, so a token that
 /// would lapse mid-request is renewed first.
@@ -151,6 +159,9 @@ pub(crate) fn credentials_path() -> Result<PathBuf, String> {
 /// token endpoint and persists the rotated credentials, falling back to the
 /// stored token if the refresh itself fails.
 fn read_token() -> Result<String, String> {
+    if let Some(token) = env_token(std::env::var(ENV_TOKEN).ok()) {
+        return Ok(token);
+    }
     let path = credentials_path()?;
     let text =
         std::fs::read_to_string(&path).map_err(|e| format!("reading {}: {e}", path.display()))?;
@@ -189,6 +200,13 @@ fn read_token() -> Result<String, String> {
         // token and let the request report the real error.
         _ => Ok(access),
     }
+}
+
+/// The [`ENV_TOKEN`] value, when it holds one: unset, empty and blank all mean
+/// "use the credentials file".
+fn env_token(value: Option<String>) -> Option<String> {
+    let token = value?.trim().to_string();
+    (!token.is_empty()).then_some(token)
 }
 
 /// A token is expired when its expiry (minus a safety skew) is at or before
@@ -511,6 +529,16 @@ mod tests {
         assert_eq!(status.windows[1].label, "Week (all models)");
         assert_eq!(status.windows[2].label, "Week \u{b7} Sonnet");
         assert_eq!(status.windows[2].severity, "warning");
+    }
+
+    #[test]
+    fn env_token_is_used_only_when_it_holds_one() {
+        assert_eq!(env_token(Some("tok".into())), Some("tok".into()));
+        assert_eq!(env_token(Some("  tok\n".into())), Some("tok".into()));
+        // Unset, empty and blank all fall through to the credentials file.
+        assert_eq!(env_token(None), None);
+        assert_eq!(env_token(Some(String::new())), None);
+        assert_eq!(env_token(Some("  \t".into())), None);
     }
 
     #[test]

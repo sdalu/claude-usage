@@ -30,6 +30,12 @@ safe on a given account, without a network call: it fingerprints the refresh
 token (never storing it) and reports, after a refresh has happened, whether the
 token changed.
 
+`CLAUDE_CODE_OAUTH_TOKEN`, when set, wins over the file, because it is the
+variable Claude Code itself honours: a machine set up for the CLI with a
+`setup-token` token is set up for this tool too. The token is used as given —
+it comes with no expiry and no refresh token, so there is nothing to check and
+nothing to write back, and the read-only rule holds trivially.
+
 ## One layout, two renderers
 
 The TUI and the `-1` single-shot output are the same ratatui code; single-shot
