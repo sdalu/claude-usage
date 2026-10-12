@@ -22,9 +22,9 @@ and write the rotated credentials back. See
 
 ```text
 ┌ Claude usage limits · Max 5x ─────────────────────────────────────── ? ┐
-│ Session (5h)        ━━───────────────────  11% used · resets in 37m    │
-│ Week (all models) ◀ ━━━━━━━━─────────────  39% used · resets Tue 06:00 │
-│ Week · Sonnet       ━━━━━━━━━━━━━────────  62% used · resets Tue 06:00 │
+│ Session (5h)        ━━────────────────╋──  11% used · resets in 37m    │
+│ Week (all models) ◀ ━━━━━━━━────╋────────  39% used · resets Tue 06:00 │
+│ Week · Sonnet       ━━━━━━━━━━━━╋────────  62% used · resets Tue 06:00 │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -55,6 +55,14 @@ countdown
 (`resets in 1h 20m`, in d/h/m) until it is more than two days out, when it
 switches to the absolute `resets Tue 06:00`. The `◀` marks the **binding**
 window (the API's `is_active`) — the one you will hit first.
+
+The `╋` on each bar marks the **pace**: where the fill would be by now if the
+allowance were used at an even rate from the window's start to its reset. A
+fill short of it is a window that lasts; a fill past it runs out before the
+reset if use keeps up — above, the Sonnet week has used 62% with 57% of the
+week gone. The window's length is read off its kind (5 hours for the session,
+7 days for a weekly one), so a window of a kind not yet seen, the spend
+window, and a window not started yet carry no mark.
 
 When the terminal is too narrow for the full labels, they shorten in steps —
 first the word `resets` is dropped (`resets in 1h 20m` → `in 1h 20m`), then
@@ -163,6 +171,11 @@ for the session, `wk` for the all-models week, the model name for a per-model
 week, `$` for spend. The **binding** window (the one you hit first — `◀` in the
 TUI) is set in polybar's second font slot, which is conventionally the bold
 face, so it stands out without extra width.
+
+A `↑` after a percentage (`Sonnet 62%↑`) marks a window running **ahead of its
+pace** — the fill past the TUI's `╋`, so at that rate it runs out before it
+resets. It is not judged in the first tenth of a window, where any use at all
+would read as far ahead.
 
 An open incident on the status page puts a `⚠` **in front** of the line,
 coloured by the incident's impact — critical colour for `major`/`critical`,
@@ -418,10 +431,10 @@ claude-usage --check-rotation   # reports the verdict
   "windows": [
     { "label": "Session (5h)", "group": "session", "percent": 11,
       "severity": "normal", "resets_at": "2026-06-19T20:30:00+00:00",
-      "is_active": false },
+      "is_active": false, "pace": 87.7, "ahead_of_pace": false },
     { "label": "Week (all models)", "group": "weekly", "percent": 39,
       "severity": "normal", "resets_at": "2026-06-23T06:00:00+00:00",
-      "is_active": true }
+      "is_active": true, "pace": 57.1, "ahead_of_pace": false }
   ],
   "incidents": [
     { "name": "Elevated errors for Claude Sonnet 5", "impact": "major",
@@ -429,6 +442,10 @@ claude-usage --check-rotation   # reports the verdict
   ]
 }
 ```
+
+`pace` is the percent an even rate of use would have reached by now (`null`
+for a window not started or of unknown length), and `ahead_of_pace` is the
+polybar `↑`: used past that pace, judged from a tenth of the window on.
 
 `incidents` lists the status page's unresolved incidents, worst first: `[]`
 when it is all clear, `null` when the page was not checked (`--no-incidents`)
@@ -444,7 +461,7 @@ src/
 ├── main.rs        argument parsing + dispatch (UI vs --json vs --check-rotation)
 ├── usage_api.rs   fetches & parses GET /api/oauth/usage; OAuth token refresh
 ├── incidents.rs   fetches & parses the status page's unresolved incidents
-├── views.rs       UsageStatus -> pre-formatted gauge rows
+├── views.rs       UsageStatus -> pre-formatted gauge rows; severity and pace
 ├── tui.rs         ratatui monitor (gauges, refresh, key handling)
 ├── polybar.rs     --polybar: one-line status-bar rendering + the tail loop
 ├── cache.rs       cross-process cache: one fetch (usage, incidents) serves every instance

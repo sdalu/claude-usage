@@ -46,7 +46,32 @@ also what the screenshot in the README is generated from.
 The polybar line is a genuinely different renderer — a bar has one line, no
 alignment columns, and its own markup — so it is separate. What the two must
 agree on is the severity colour, so the threshold rule lives once in
-`views::level` and both call it.
+`views::level` and both call it. The pace is shared the same way:
+`views::pace` and `views::ahead_of_pace` serve the TUI's tick, the polybar
+arrow and the JSON fields alike.
+
+## Pace: the fill against the clock
+
+A percentage alone does not say whether a window will last: 60% used is fine
+with an hour of a five-hour session left and not fine with four. The pace is
+the share of the window gone by — `1 − remaining / length` — which is the
+percent an even rate of use would have spent by now, and a fill past it runs
+out before the reset if use keeps up.
+
+**Why the length comes from the kind.** The response carries the reset time
+but not when the window started. The kinds name their lengths (the session is
+five hours, the weekly windows seven days, as the legacy `five_hour` and
+`seven_day` keys also say), so `period_for` maps the kind and leaves unknown
+kinds without one — no tick rather than a guessed one. A reset time already
+past (stale data) clamps to the end of the window, and one further out than
+the length (clock skew) to its start.
+
+**Why the TUI shows it and the bar only judges it.** The tick is information
+without a verdict: it shows where even use would be, and the eye compares the
+fill. The polybar line has no room for a second scale, so it gives only the
+verdict, `↑`, and a verdict needs a floor: in the first tenth of a window any
+use reads as far ahead, which is true and not worth a mark. The tick has no
+such floor, because it claims nothing.
 
 ## Status-bar output is a line, not JSON
 
@@ -221,6 +246,10 @@ parsed (the write-back and cache toggles, which are process-wide) stays in
   later. Polybar signals the process, so this shows up only when testing by
   hand (piping into `head` looks like a hang).
 - No history: see "One data source" above.
+- The pace assumes the window opened exactly one length before its reset. A
+  window whose real start differs (an allowance changed mid-window, say)
+  would be judged against the wrong clock, and nothing in the response says
+  so.
 - The status page is read only at the usage cadence, so an incident opened
   between two refreshes shows up at the next one, and a degraded component
   without an incident declared against it is not seen at all.

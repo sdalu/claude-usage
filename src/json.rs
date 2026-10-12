@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 
 use crate::incidents::{Incident, Incidents};
 use crate::usage_api::{LimitWindow, UsageStatus};
+use crate::views;
 
 pub fn build(status: &Result<UsageStatus, String>, incidents: Option<&Incidents>) -> Value {
     let mut value = match status {
@@ -24,6 +25,7 @@ pub fn build(status: &Result<UsageStatus, String>, incidents: Option<&Incidents>
 }
 
 fn window(w: &LimitWindow) -> Value {
+    let now = chrono::Local::now();
     json!({
         "label": w.label,
         "group": w.group,
@@ -31,6 +33,10 @@ fn window(w: &LimitWindow) -> Value {
         "severity": w.severity,
         "resets_at": w.resets_at.map(|t| t.to_rfc3339()),
         "is_active": w.is_active,
+        // The percent an even rate of use would have reached by now; null when
+        // the window has not started or its length is unknown.
+        "pace": views::pace(w, now).map(|p| p * 100.0),
+        "ahead_of_pace": views::ahead_of_pace(w, now),
         "used_dollars": w.used_dollars,
         "limit_dollars": w.limit_dollars,
     })
@@ -52,6 +58,23 @@ mod tests {
 
     const USAGE: &str = r#"{"limits":[{"kind":"session","group":"session","percent":11,
         "severity":"normal","scope":null,"is_active":false}]}"#;
+
+    #[test]
+    fn windows_carry_their_pace() {
+        let reset = (chrono::Local::now() + chrono::Duration::minutes(150)).to_rfc3339();
+        let body = format!(
+            r#"{{"limits":[{{"kind":"session","group":"session","percent":62,
+                "severity":"normal","resets_at":"{reset}","is_active":false}}]}}"#
+        );
+        let value = build(&usage_api::parse(&body), None);
+        let pace = value["windows"][0]["pace"].as_f64().unwrap();
+        assert!((pace - 50.0).abs() < 0.1, "{pace}");
+        assert_eq!(value["windows"][0]["ahead_of_pace"], json!(true));
+        // No reset time (not started): no pace, and never ahead.
+        let value = build(&usage_api::parse(USAGE), None);
+        assert!(value["windows"][0]["pace"].is_null());
+        assert_eq!(value["windows"][0]["ahead_of_pace"], json!(false));
+    }
 
     #[test]
     fn incidents_are_listed_or_null() {

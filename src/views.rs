@@ -41,6 +41,34 @@ pub fn level(severity: &str, ratio: f64) -> Level {
     }
 }
 
+/// Below this fraction of a window gone by, usage is not judged against the
+/// pace: a few minutes into a fresh session any use at all would read as far
+/// ahead of it, which is true and useless.
+const MIN_PACE_ELAPSED: f64 = 0.1;
+
+/// How far through its window a limit is, 0.0 at the start to 1.0 at the
+/// reset: the share of the allowance an even rate of use would have spent by
+/// now. None when that cannot be known — a window not started yet (no reset
+/// time), or one of a kind whose length is unknown (and the spend window).
+pub fn pace(window: &LimitWindow, now: DateTime<Local>) -> Option<f64> {
+    let period = window.period?.num_seconds() as f64;
+    let remaining = (window.resets_at? - now).num_seconds() as f64;
+    if period <= 0.0 {
+        return None;
+    }
+    Some(((period - remaining) / period).clamp(0.0, 1.0))
+}
+
+/// Whether the window is being used faster than an even rate would last it to
+/// the reset: kept up, it runs out before the window does. Not judged in the
+/// first [`MIN_PACE_ELAPSED`] of the window.
+pub fn ahead_of_pace(window: &LimitWindow, now: DateTime<Local>) -> bool {
+    match pace(window, now) {
+        Some(elapsed) if elapsed >= MIN_PACE_ELAPSED => window.percent > elapsed * 100.0,
+        _ => false,
+    }
+}
+
 /// One usage window rendered as a progress bar. The text pieces are kept
 /// separate so the TUI can drop words (`resets`, then `used`) on narrow
 /// terminals; `reset` holds only the suffix (e.g. `in 1h 20m`, `Tue 06:00`).
@@ -52,6 +80,9 @@ pub struct GaugeView {
     pub ratio: f64,
     pub severity: String,
     pub active: bool,
+    /// Where an even rate of use would have the bar by now (see [`pace`]);
+    /// the TUI marks it on the bar.
+    pub pace: Option<f64>,
 }
 
 pub struct Views {
@@ -91,6 +122,7 @@ fn gauge(window: &LimitWindow, now: DateTime<Local>) -> GaugeView {
         ratio: (window.percent / 100.0).clamp(0.0, 1.0),
         severity: window.severity.clone(),
         active: window.is_active,
+        pace: pace(window, now),
     }
 }
 
@@ -164,10 +196,61 @@ mod tests {
             percent: 0.0,
             severity: "normal".into(),
             resets_at,
+            period: None,
             is_active: false,
             used_dollars: None,
             limit_dollars: None,
         }
+    }
+
+    fn timed(percent: f64, period: Duration, left: Duration, now: DateTime<Local>) -> LimitWindow {
+        LimitWindow {
+            percent,
+            period: Some(period),
+            ..window("session", Some(now + left))
+        }
+    }
+
+    #[test]
+    fn pace_is_the_share_of_the_window_gone_by() {
+        let now = Local::now();
+        let half = timed(30.0, Duration::hours(5), Duration::minutes(150), now);
+        assert!((pace(&half, now).unwrap() - 0.5).abs() < 1e-9);
+        // A week with one day left is six sevenths through.
+        let week = timed(0.0, Duration::days(7), Duration::days(1), now);
+        assert!((pace(&week, now).unwrap() - 6.0 / 7.0).abs() < 1e-9);
+        // A reset already past (stale data) is the end, never beyond it; a
+        // reset further out than the period (clock skew) is the start.
+        let past = timed(0.0, Duration::hours(5), Duration::minutes(-10), now);
+        assert_eq!(pace(&past, now), Some(1.0));
+        let skew = timed(0.0, Duration::hours(5), Duration::hours(6), now);
+        assert_eq!(pace(&skew, now), Some(0.0));
+    }
+
+    #[test]
+    fn pace_is_unknown_without_a_reset_or_a_period() {
+        let now = Local::now();
+        assert_eq!(pace(&window("session", None), now), None);
+        // No period: a kind whose length is unknown, or the spend window.
+        assert_eq!(pace(&window("session", Some(now)), now), None);
+        assert_eq!(gauge(&window("spend", None), now).pace, None);
+    }
+
+    #[test]
+    fn ahead_of_pace_means_running_out_before_the_reset() {
+        let now = Local::now();
+        let half = |percent| timed(percent, Duration::hours(5), Duration::minutes(150), now);
+        assert!(ahead_of_pace(&half(62.0), now));
+        assert!(
+            !ahead_of_pace(&half(50.0), now),
+            "exactly on pace is not ahead"
+        );
+        assert!(!ahead_of_pace(&half(30.0), now));
+        // Too early to judge: 5% through, already 20% used.
+        let fresh = timed(20.0, Duration::hours(5), Duration::minutes(285), now);
+        assert!(!ahead_of_pace(&fresh, now));
+        // Unknown pace is never "ahead".
+        assert!(!ahead_of_pace(&window("session", None), now));
     }
 
     #[test]

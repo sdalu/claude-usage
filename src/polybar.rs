@@ -33,7 +33,11 @@ use std::time::Duration;
 
 use crate::incidents::Incidents;
 use crate::usage_api::{LimitWindow, UsageStatus};
-use crate::views::{level, Level};
+use crate::views::{ahead_of_pace, level, Level};
+
+/// Put after a window's percentage while it is being used faster than an even
+/// rate would last it to the reset (see `views::ahead_of_pace`).
+const AHEAD: &str = "\u{2191}";
 
 /// Separator between window segments.
 const SEP: &str = " \u{b7} ";
@@ -244,11 +248,17 @@ fn emit(line: &str) -> std::io::Result<()> {
     out.flush()
 }
 
-/// "5h 11%", coloured by severity and emphasised when it is the binding window.
+/// "5h 11%", coloured by severity and emphasised when it is the binding window;
+/// "5h 62%\u{2191}" when it is running ahead of its pace.
 fn segment(window: &LimitWindow, opts: &Options) -> String {
     let percent = window.percent.round() as i64;
     let ratio = (window.percent / 100.0).clamp(0.0, 1.0);
-    let text = format!("{} {percent}%", short_label(window));
+    let ahead = if ahead_of_pace(window, chrono::Local::now()) {
+        AHEAD
+    } else {
+        ""
+    };
+    let text = format!("{} {percent}%{ahead}", short_label(window));
     let painted = opts.paint(&text, level(&window.severity, ratio));
     if window.is_active {
         opts.embolden(&painted)
@@ -388,6 +398,38 @@ mod tests {
         };
         let line = render(&usage_api::parse(SAMPLE), &opts);
         assert_eq!(line, "5h 11% \u{b7} wk 39% \u{b7} Sonnet 62%");
+    }
+
+    /// A usage reply whose windows reset at times relative to now, so the
+    /// pace they are judged against does not rot with the calendar.
+    fn paced(session_percent: u32, session_left_min: i64) -> String {
+        let reset =
+            (chrono::Local::now() + chrono::Duration::minutes(session_left_min)).to_rfc3339();
+        format!(
+            r#"{{"limits":[{{"kind":"session","group":"session",
+                "percent":{session_percent},"severity":"normal",
+                "resets_at":"{reset}","scope":null,"is_active":false}}]}}"#
+        )
+    }
+
+    #[test]
+    fn a_window_ahead_of_its_pace_carries_an_arrow() {
+        let plain = Options {
+            color: false,
+            bold_font: 0,
+            ..Options::default()
+        };
+        // Half the session gone (150 of 300 minutes left).
+        let ahead = render(&usage_api::parse(&paced(62, 150)), &plain);
+        assert_eq!(ahead, "5h 62%\u{2191}");
+        let behind = render(&usage_api::parse(&paced(30, 150)), &plain);
+        assert_eq!(behind, "5h 30%");
+        // Five minutes in: too early to judge, however much is used.
+        let early = render(&usage_api::parse(&paced(40, 295)), &plain);
+        assert_eq!(early, "5h 40%");
+        // The arrow is inside the colour, so it takes the window's severity.
+        let coloured = render(&usage_api::parse(&paced(62, 150)), &Options::default());
+        assert!(coloured.contains("62%\u{2191}%{F-}"), "{coloured}");
     }
 
     #[test]

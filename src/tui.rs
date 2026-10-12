@@ -610,6 +610,9 @@ fn render_gauge_row(
         .unfilled_style(Style::new().dark_gray())
         .label("");
     f.render_widget(bar, cols[1]);
+    if let Some(pace) = gauge.pace {
+        mark_pace(f.buffer_mut(), cols[1], gauge.ratio, pace, color);
+    }
 
     // Aligned trailing text: " NN% used · $… · resets …".
     let mut spans = vec![
@@ -629,6 +632,34 @@ fn render_gauge_row(
         spans.push(Span::styled(reset, Style::new().dim()));
     }
     f.render_widget(Paragraph::new(Line::from(spans)), cols[2]);
+}
+
+/// Marks where an even rate of use would have the bar by now: a tick crossing
+/// the line, so a fill past it is a window running out before its reset. The
+/// columns follow `LineGauge`'s own layout — the line starts one cell in (after
+/// its empty label) and fills `floor(width * ratio)` cells — so the tick sits
+/// on the cell the fill would reach at an even pace, and a fill that covers it
+/// is ahead of pace.
+fn mark_pace(buf: &mut Buffer, bar: Rect, ratio: f64, pace: f64, color: Color) {
+    let start = bar.x + 1;
+    let right = bar.x + bar.width;
+    if start >= right {
+        return;
+    }
+    let width = right - start;
+    let filled_end = start + (f64::from(width) * ratio).floor() as u16;
+    let x = start + ((f64::from(width) * pace).floor() as u16).min(width - 1);
+    // The thick line set draws filled and unfilled alike with a heavy line, so
+    // the tick is the heavy cross, coloured as the stretch of line it sits on:
+    // the severity colour inside the fill, the track's grey beyond it.
+    let color = if x < filled_end {
+        color
+    } else {
+        Color::DarkGray
+    };
+    buf[(x, bar.y)]
+        .set_symbol("\u{254b}")
+        .set_style(Style::new().fg(color));
 }
 
 /// Renders a ratatui buffer to an ANSI-coloured string for `-1` single-shot
@@ -953,6 +984,52 @@ mod tests {
         app = app.with_incidents(Some(incidents(r#"{"incidents":[]}"#)));
         terminal.draw(|f| app.draw(f)).unwrap();
         assert!(app.link.is_none());
+    }
+
+    #[test]
+    fn the_pace_tick_sits_where_even_use_would_be() {
+        // sample(): the session has 37 minutes of 300 left, each week 3 days
+        // of 7, so the ticks sit at 87.7% and 57.1% of each bar's line.
+        let mut app = App::new(usage_api::parse(&sample()), None).without_intro();
+        let mut terminal = Terminal::new(TestBackend::new(74, 6)).unwrap();
+        terminal.draw(|f| app.draw(f)).unwrap();
+        let rendered = format!("{}", terminal.backend());
+        let rows: Vec<&str> = rendered.lines().skip(1).take(3).collect();
+        for row in &rows {
+            assert_eq!(row.matches('\u{254b}').count(), 1, "{row}");
+        }
+        // Where on the line: the share of the line's cells before the tick.
+        let share = |row: &str| {
+            let line: String = row
+                .chars()
+                .filter(|&c| c == '\u{2501}' || c == '\u{254b}')
+                .collect();
+            let before = line.chars().take_while(|&c| c != '\u{254b}').count();
+            before as f64 / line.chars().count() as f64
+        };
+        assert!((share(rows[0]) - 0.877).abs() < 0.05, "{}", rows[0]);
+        assert!((share(rows[1]) - 0.571).abs() < 0.05, "{}", rows[1]);
+
+        // Coloured as the line under it: inside the fill, the bar's severity
+        // colour (the Sonnet week, at "warning"); beyond it, the track's grey
+        // (the all-models week, 39% against a 57% pace).
+        let buf = terminal.backend().buffer();
+        let tick = |y: u16| {
+            (0..buf.area.width)
+                .find(|&x| buf[(x, y)].symbol() == "\u{254b}")
+                .unwrap()
+        };
+        assert_eq!(buf[(tick(3), 3)].fg, Color::Yellow);
+        assert_eq!(buf[(tick(3) - 1, 3)].fg, Color::Yellow);
+        assert_eq!(buf[(tick(2), 2)].fg, Color::DarkGray);
+        assert_eq!(buf[(tick(2) + 1, 2)].fg, Color::DarkGray);
+
+        // A window with no pace (not started) has no tick.
+        let body = r#"{"limits":[{"kind":"session","group":"session","percent":0,
+            "severity":"normal","is_active":false}]}"#;
+        let mut app = App::new(usage_api::parse(body), None).without_intro();
+        terminal.draw(|f| app.draw(f)).unwrap();
+        assert!(!format!("{}", terminal.backend()).contains('\u{254b}'));
     }
 
     #[test]

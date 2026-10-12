@@ -74,6 +74,9 @@ pub struct LimitWindow {
     pub percent: f64,
     pub severity: String,
     pub resets_at: Option<DateTime<Local>>,
+    /// How long the window runs from start to reset, when its kind says so
+    /// (5 hours for the session, 7 days for a weekly one); None otherwise.
+    pub period: Option<chrono::Duration>,
     pub is_active: bool,
     pub used_dollars: Option<f64>,
     pub limit_dollars: Option<f64>,
@@ -392,6 +395,7 @@ fn limit_window(value: &Value, root: &Value) -> Option<LimitWindow> {
             .unwrap_or("normal")
             .to_string(),
         resets_at,
+        period: period_for(kind, value.get("group").and_then(Value::as_str)),
         is_active: value
             .get("is_active")
             .and_then(Value::as_bool)
@@ -454,6 +458,7 @@ fn spend_window(root: &Value) -> Option<LimitWindow> {
             .unwrap_or("normal")
             .to_string(),
         resets_at: None,
+        period: None,
         is_active: false,
         used_dollars: money(spend.get("used")),
         limit_dollars: money(spend.get("limit")),
@@ -466,6 +471,20 @@ fn money(value: Option<&Value>) -> Option<f64> {
     let minor = value.get("amount_minor").and_then(Value::as_i64)?;
     let exponent = value.get("exponent").and_then(Value::as_i64).unwrap_or(2);
     Some(minor as f64 / 10f64.powi(exponent as i32))
+}
+
+/// How long a window of this kind runs. Read off the kind, as the labels are:
+/// the session is five hours, and every weekly window — all models or one —
+/// is seven days, the same two the response's legacy `five_hour`/`seven_day`
+/// keys name. Anything else is a kind not yet seen, whose length is unknown.
+fn period_for(kind: &str, group: Option<&str>) -> Option<chrono::Duration> {
+    match (kind, group) {
+        ("session", _) => Some(chrono::Duration::hours(5)),
+        ("weekly_all" | "weekly_scoped", _) | (_, Some("weekly")) => {
+            Some(chrono::Duration::days(7))
+        }
+        _ => None,
+    }
 }
 
 fn label_for(kind: &str, scope: Option<&Value>) -> String {
@@ -529,6 +548,22 @@ mod tests {
         assert_eq!(status.windows[1].label, "Week (all models)");
         assert_eq!(status.windows[2].label, "Week \u{b7} Sonnet");
         assert_eq!(status.windows[2].severity, "warning");
+    }
+
+    #[test]
+    fn window_length_follows_the_kind() {
+        let status = parse(SAMPLE).unwrap();
+        assert_eq!(status.windows[0].period, Some(chrono::Duration::hours(5)));
+        assert_eq!(status.windows[1].period, Some(chrono::Duration::days(7)));
+        assert_eq!(status.windows[2].period, Some(chrono::Duration::days(7)));
+        // A weekly group under a kind not seen before is still a week; any
+        // other unknown kind has no length rather than a guessed one.
+        assert_eq!(
+            period_for("weekly_new", Some("weekly")),
+            Some(chrono::Duration::days(7))
+        );
+        assert_eq!(period_for("monthly", Some("monthly")), None);
+        assert_eq!(period_for("monthly", None), None);
     }
 
     #[test]
