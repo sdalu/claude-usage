@@ -82,8 +82,13 @@ display. `--no-incidents` turns the check off (no marker, no request to the
 status page). Regenerate the capture with
 `cargo test open_incident -- --nocapture`.
 
-In `--polybar` mode the marker is also a click target that opens the
-incident itself — see [Polybar](#polybar).
+The text is a terminal hyperlink (OSC 8) to the incident on the status page —
+its `shortlink`, or the page's front door when it has none — so a click (often
+Ctrl-click) opens it, in terminals that support hyperlinks (kitty, WezTerm,
+foot, GNOME Terminal and other VTE ones, iTerm2, Windows Terminal). Elsewhere
+the escape is ignored and the text is plain. The `-1` frame carries the same
+link. In `--polybar` mode the marker is a click target too — see
+[Polybar](#polybar).
 
 ## Build & run
 

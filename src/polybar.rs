@@ -41,10 +41,6 @@ const SEP: &str = " \u{b7} ";
 /// Put in front of the line while the status page lists an open incident.
 const INCIDENT: &str = "\u{26a0}";
 
-/// Where the incident marker's click goes when the incident carries no
-/// shortlink of its own, or one that did not survive [`is_safe_url`].
-const STATUS_PAGE: &str = "https://status.claude.com/";
-
 /// Command the incident marker's click runs, the URL appended. `xdg-open`
 /// because it is what a desktop already has wired to a browser.
 pub const DEFAULT_OPENER: &str = "xdg-open";
@@ -174,37 +170,11 @@ pub fn render_line(
     match incidents.and_then(Incidents::worst) {
         Some(worst) => {
             let marker = opts.paint(INCIDENT, worst.impact.level());
-            let marker = opts.on_left_click(&marker, incident_url(worst.url.as_deref()));
+            let marker = opts.on_left_click(&marker, worst.link());
             format!("{marker} {line}")
         }
         None => line,
     }
-}
-
-/// Where the incident marker's click goes: the incident's own status-page
-/// shortlink when the reply carried a usable one, else the page front door.
-fn incident_url(url: Option<&str>) -> &str {
-    match url {
-        Some(url) if is_safe_url(url) => url,
-        _ => STATUS_PAGE,
-    }
-}
-
-/// Whether a shortlink is fit to hand to polybar. Narrow on purpose: the value
-/// arrives over the network and ends up inside a command a shell will run, so
-/// the test is "a plain https URL of printable characters", not "parses as a
-/// URL". Everything else falls back to [`STATUS_PAGE`], which loses the deep
-/// link and nothing else.
-fn is_safe_url(url: &str) -> bool {
-    url.starts_with("https://")
-        && url.len() <= 300
-        // No spaces, no control characters, nothing needing an encoding guess.
-        && url.chars().all(|c| c.is_ascii_graphic())
-        // Quoting in the command keeps the shell out of it; these three are the
-        // characters that would escape the quoting or polybar's tag syntax.
-        && !url.contains('\'')
-        && !url.contains('{')
-        && !url.contains('}')
 }
 
 /// Tail mode: one long-lived process printing a line per refresh for a polybar
@@ -381,6 +351,7 @@ fn escape_action(command: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::incidents::STATUS_PAGE;
     use crate::usage_api;
 
     const SAMPLE: &str = r#"{
@@ -542,6 +513,15 @@ mod tests {
     }
 
     /// One open incident carrying the status page's own deep link to it.
+    fn incident(url: Option<&str>) -> crate::incidents::Incident {
+        crate::incidents::Incident {
+            name: "Outage".to_string(),
+            impact: crate::incidents::Impact::Major,
+            status: "investigating".to_string(),
+            url: url.map(String::from),
+        }
+    }
+
     fn incident_linked(shortlink: &str) -> Incidents {
         crate::incidents::parse(&format!(
             r#"{{"incidents":[{{"name":"Elevated errors","status":"investigating",
@@ -608,7 +588,7 @@ mod tests {
 
     #[test]
     fn an_incident_with_no_link_falls_back_to_the_front_door() {
-        assert_eq!(incident_url(None), STATUS_PAGE);
+        assert_eq!(incident(None).link(), STATUS_PAGE);
         let line = render_line(
             &usage_api::parse(SAMPLE),
             Some(&incidents("major")),
@@ -634,11 +614,11 @@ mod tests {
             "https://stspg.io/x y",
             "https://stspg.io/x\n",
         ] {
-            assert!(!is_safe_url(hostile), "{hostile}");
-            assert_eq!(incident_url(Some(hostile)), STATUS_PAGE, "{hostile}");
+            assert_eq!(incident(Some(hostile)).link(), STATUS_PAGE, "{hostile}");
         }
         // The real shape still gets through.
-        assert!(is_safe_url("https://stspg.io/9xz4hhmd1jzn"));
+        let real = "https://stspg.io/9xz4hhmd1jzn";
+        assert_eq!(incident(Some(real)).link(), real);
     }
 
     #[test]

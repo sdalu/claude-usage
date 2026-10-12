@@ -22,6 +22,10 @@ use crate::views::Level;
 
 const URL: &str = "https://status.claude.com/api/v2/incidents/unresolved.json";
 
+/// Where an incident links to when it carries no shortlink of its own, or one
+/// that did not survive [`is_safe_url`].
+pub const STATUS_PAGE: &str = "https://status.claude.com/";
+
 /// When false, the status page is never contacted (`--no-incidents`). Set once
 /// at startup.
 static ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
@@ -81,6 +85,37 @@ pub struct Incident {
     /// Statuspage's lifecycle stage: investigating, identified, monitoring.
     pub status: String,
     pub url: Option<String>,
+}
+
+impl Incident {
+    /// Where the incident links to — polybar's click, the TUI's hyperlink: its
+    /// own status-page shortlink when the reply carried a usable one, else the
+    /// page front door.
+    pub fn link(&self) -> &str {
+        match self.url.as_deref() {
+            Some(url) if is_safe_url(url) => url,
+            _ => STATUS_PAGE,
+        }
+    }
+}
+
+/// Whether a shortlink is fit to pass on. Narrow on purpose: the value arrives
+/// over the network and ends up inside a command a shell will run (polybar) or
+/// inside a terminal escape sequence (the TUI), so the test is "a plain https
+/// URL of printable characters", not "parses as a URL". Everything else falls
+/// back to [`STATUS_PAGE`], which loses the deep link and nothing else.
+fn is_safe_url(url: &str) -> bool {
+    url.starts_with("https://")
+        && url.len() <= 300
+        // No spaces, no control characters (which would end an OSC 8 escape),
+        // nothing needing an encoding guess.
+        && url.chars().all(|c| c.is_ascii_graphic())
+        // Quoting in polybar's command keeps the shell out of it; these three
+        // are the characters that would escape the quoting or polybar's tag
+        // syntax.
+        && !url.contains('\'')
+        && !url.contains('{')
+        && !url.contains('}')
 }
 
 /// The unresolved incidents, worst first, and when they were checked.

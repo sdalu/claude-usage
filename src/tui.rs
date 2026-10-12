@@ -44,6 +44,19 @@ pub struct App {
     border: bool,
     started: Instant,
     intro_was_active: bool,
+    /// Where the incident text sits on the last frame drawn, and the page it
+    /// links to; None when no incident is showing.
+    link: Option<Link>,
+}
+
+/// A stretch of one screen row made into a terminal hyperlink (OSC 8), so a
+/// click on the incident text opens the incident in the browser.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Link {
+    x: u16,
+    y: u16,
+    width: u16,
+    url: String,
 }
 
 impl App {
@@ -62,6 +75,7 @@ impl App {
             border: true,
             started: Instant::now(),
             intro_was_active: false,
+            link: None,
         }
     }
 
@@ -93,7 +107,10 @@ impl App {
             .max(40);
         let mut terminal = Terminal::new(TestBackend::new(width, self.box_height()))?;
         terminal.draw(|f| self.draw(f))?;
-        print!("{}", buffer_to_ansi(terminal.backend().buffer()));
+        print!(
+            "{}",
+            buffer_to_ansi(terminal.backend().buffer(), self.link.as_ref())
+        );
         Ok(())
     }
 
@@ -118,7 +135,22 @@ impl App {
             self.intro_was_active = intro;
 
             if needs_draw {
-                terminal.draw(|f| self.draw(f))?;
+                let frame = terminal.draw(|f| self.draw(f))?;
+                let link = self
+                    .link
+                    .as_ref()
+                    .map(|link| (link.x, link.y, hyperlink(frame.buffer, link)));
+                // ratatui knows nothing of hyperlinks, so the incident text is
+                // written over once more, now wrapped in one. Its cells are
+                // unchanged, so ratatui's idea of the screen stays right; when
+                // they do change, ratatui rewrites them unlinked and this
+                // links them again.
+                if let Some((x, y, text)) = link {
+                    let out = terminal.backend_mut();
+                    crossterm::queue!(out, crossterm::cursor::MoveTo(x, y))?;
+                    io::Write::write_all(out, text.as_bytes())?;
+                    io::Write::flush(out)?;
+                }
                 needs_draw = false;
             }
             // Wake up regularly so the auto-refresh fires (and the intro
@@ -203,6 +235,28 @@ impl App {
         Some((text, worst.impact.level()))
     }
 
+    /// Where the incident text landed on the top border, read back from the
+    /// drawn buffer rather than recomputed from ratatui's title layout: the
+    /// cells from the space before the marker on, while they keep the
+    /// marker's colour (the border and the "?" hint have colours of their own).
+    fn find_link(&self, buf: &Buffer, area: Rect) -> Option<Link> {
+        let url = self.incidents.as_ref()?.worst()?.link().to_string();
+        let y = area.y;
+        let right = area.x + area.width;
+        let marker = (area.x + 1..right).find(|&x| buf[(x, y)].symbol() == "\u{26a0}")?;
+        let fg = buf[(marker, y)].fg;
+        let end = (marker..right)
+            .find(|&x| buf[(x, y)].fg != fg)
+            .unwrap_or(right);
+        let x = marker - 1;
+        Some(Link {
+            x,
+            y,
+            width: end - x,
+            url,
+        })
+    }
+
     fn toggle_interval(&mut self) {
         self.auto_interval = if self.auto_interval == chrono::Duration::minutes(1) {
             chrono::Duration::minutes(5)
@@ -245,6 +299,12 @@ impl App {
             .split(f.area());
 
         self.draw_windows(f, chunks[0]);
+        self.link = if self.border && !self.show_help {
+            self.find_link(f.buffer_mut(), chunks[0])
+        } else {
+            // The help may cover the border; the link is not worth the care.
+            None
+        };
         if self.show_help {
             self.draw_help(f, f.area());
         }
@@ -573,23 +633,48 @@ fn render_gauge_row(
 
 /// Renders a ratatui buffer to an ANSI-coloured string for `-1` single-shot
 /// output (so the frame stays in the terminal after the program exits).
-fn buffer_to_ansi(buf: &Buffer) -> String {
-    use std::fmt::Write;
+fn buffer_to_ansi(buf: &Buffer, link: Option<&Link>) -> String {
     let area = *buf.area();
     let mut out = String::new();
     for y in 0..area.height {
-        for x in 0..area.width {
-            let cell = &buf[(x, y)];
-            let codes = sgr_codes(&cell.style());
-            if codes.is_empty() {
-                out.push_str(cell.symbol());
-            } else {
-                let _ = write!(out, "\u{1b}[{codes}m{}\u{1b}[0m", cell.symbol());
+        let mut x = 0;
+        while x < area.width {
+            match link {
+                Some(link) if link.y == y && link.x == x => {
+                    out.push_str(&hyperlink(buf, link));
+                    x += link.width;
+                }
+                _ => {
+                    push_cell(&mut out, &buf[(x, y)]);
+                    x += 1;
+                }
             }
         }
         out.push('\n');
     }
     out
+}
+
+/// The cells under `link`, styled, wrapped in an OSC 8 hyperlink. The URL has
+/// been through `Incident::link`, so it carries no control character that
+/// could end the escape early.
+fn hyperlink(buf: &Buffer, link: &Link) -> String {
+    let mut out = format!("\u{1b}]8;;{}\u{1b}\\", link.url);
+    for x in link.x..link.x + link.width {
+        push_cell(&mut out, &buf[(x, link.y)]);
+    }
+    out.push_str("\u{1b}]8;;\u{1b}\\");
+    out
+}
+
+fn push_cell(out: &mut String, cell: &ratatui::buffer::Cell) {
+    use std::fmt::Write;
+    let codes = sgr_codes(&cell.style());
+    if codes.is_empty() {
+        out.push_str(cell.symbol());
+    } else {
+        let _ = write!(out, "\u{1b}[{codes}m{}\u{1b}[0m", cell.symbol());
+    }
 }
 
 fn sgr_codes(style: &Style) -> String {
@@ -810,6 +895,89 @@ mod tests {
         let top = top_border(36, incidents(ONE_INCIDENT));
         assert!(top.contains('\u{26a0}'), "{top}");
         assert!(!top.contains("Elev"), "{top}");
+    }
+
+    #[test]
+    fn incident_text_is_a_hyperlink_to_the_incident() {
+        let linked = r#"{"incidents":[{"name":"Elevated errors for Claude Sonnet 5",
+            "status":"investigating","impact":"major",
+            "shortlink":"https://stspg.io/jt14jk41pjsf"}]}"#;
+        let mut app = App::new(usage_api::parse(&sample()), Some("Max 5x".into()))
+            .without_intro()
+            .with_incidents(Some(incidents(linked)));
+        let mut terminal = Terminal::new(TestBackend::new(74, 6)).unwrap();
+        terminal.draw(|f| app.draw(f)).unwrap();
+
+        // The link covers the alert text exactly, spaces included.
+        let link = app.link.clone().unwrap();
+        assert_eq!(link.url, "https://stspg.io/jt14jk41pjsf");
+        let buf = terminal.backend().buffer();
+        let covered: String = (link.x..link.x + link.width)
+            .map(|x| buf[(x, link.y)].symbol())
+            .collect();
+        assert_eq!(covered, " \u{26a0} Elevated errors for Claude Sonnet 5 ");
+
+        // The single-shot output wraps it in OSC 8, and keeps the row's width.
+        let ansi = buffer_to_ansi(buf, Some(&link));
+        let top = ansi.lines().next().unwrap();
+        assert!(
+            top.contains("\u{1b}]8;;https://stspg.io/jt14jk41pjsf\u{1b}\\"),
+            "{top:?}"
+        );
+        assert!(
+            top.contains("m \u{1b}[0m\u{1b}]8;;\u{1b}\\\u{2510}"),
+            "{top:?}"
+        );
+        let plain = buffer_to_ansi(buf, None);
+        assert_eq!(
+            ansi.replace("\u{1b}]8;;https://stspg.io/jt14jk41pjsf\u{1b}\\", "")
+                .replace("\u{1b}]8;;\u{1b}\\", ""),
+            plain
+        );
+
+        // No shortlink: the page front door.
+        let mut app = App::new(usage_api::parse(&sample()), None)
+            .without_intro()
+            .with_incidents(Some(incidents(ONE_INCIDENT)));
+        terminal.draw(|f| app.draw(f)).unwrap();
+        assert_eq!(
+            app.link.as_ref().unwrap().url,
+            crate::incidents::STATUS_PAGE
+        );
+
+        // The help overlay drops it; so does an all-clear.
+        app.show_help = true;
+        terminal.draw(|f| app.draw(f)).unwrap();
+        assert!(app.link.is_none());
+        app.show_help = false;
+        app = app.with_incidents(Some(incidents(r#"{"incidents":[]}"#)));
+        terminal.draw(|f| app.draw(f)).unwrap();
+        assert!(app.link.is_none());
+    }
+
+    #[test]
+    fn a_cut_alert_beside_the_intro_hint_is_linked_alone() {
+        // Intro still on: the "?" hint sits right of the alert, in a colour of
+        // its own, and the alert is cut to the room left.
+        let mut app = App::new(usage_api::parse(&sample()), Some("Max 5x".into()))
+            .with_incidents(Some(incidents(ONE_INCIDENT)));
+        assert!(app.intro_active());
+        let mut terminal = Terminal::new(TestBackend::new(60, 6)).unwrap();
+        terminal.draw(|f| app.draw(f)).unwrap();
+        let link = app.link.clone().unwrap();
+        let buf = terminal.backend().buffer();
+        let covered: String = (link.x..link.x + link.width)
+            .map(|x| buf[(x, link.y)].symbol())
+            .collect();
+        assert!(covered.starts_with(" \u{26a0} Elev"), "{covered:?}");
+        assert!(covered.ends_with("\u{2026} "), "{covered:?}");
+        assert!(!covered.contains('?'), "{covered:?}");
+
+        // Narrower: the bare marker, still linked.
+        let mut terminal = Terminal::new(TestBackend::new(40, 6)).unwrap();
+        terminal.draw(|f| app.draw(f)).unwrap();
+        let link = app.link.clone().unwrap();
+        assert_eq!(link.width, 3);
     }
 
     #[test]

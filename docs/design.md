@@ -169,6 +169,19 @@ the rest of the line to the module's own `click-right`, which is the only route
 to the page when there is no incident and so no marker to click. The two
 compose rather than compete.
 
+**Why the TUI's link is laid over the frame rather than drawn into it.**
+ratatui has no notion of a hyperlink, and its buffer measures each cell's
+symbol to decide what to redraw, so an OSC 8 escape stored in a cell throws
+that accounting off (ratatui's own example works around it by splitting the
+text into two-character chunks). Instead the frame is drawn plain, the
+incident text is found again on the drawn top row (by the marker and its
+colour, not by recomputing ratatui's title layout), and those same cells are
+written once more wrapped in the escape. The cells' content is unchanged, so
+ratatui's picture of the screen stays true; when they do change it rewrites
+them unlinked and the next overlay links them again. The URL goes through the
+same screen as polybar's, which also keeps control characters from ending the
+escape early.
+
 **Why the URL is quoted and screened.** The action's command reaches a shell,
 and the URL arrives over the network, so the two layers between them each get
 their own defence: the URL is single-quoted, and `is_safe_url` refuses anything
