@@ -42,6 +42,8 @@ pub struct App {
     show_updated: bool,
     show_intro: bool,
     border: bool,
+    /// Mark each bar's pace (`--no-pace` turns it off).
+    pace: bool,
     started: Instant,
     intro_was_active: bool,
     /// Where the incident text sits on the last frame drawn, and the page it
@@ -65,7 +67,7 @@ impl App {
             // Age the monitor from when the data was fetched — which, with a
             // result shared by another instance, is not when we read it.
             last_refresh: fetched_at(&status),
-            views: crate::views::build(&status),
+            views: crate::views::build(&status, true),
             plan,
             incidents: None,
             auto_interval: chrono::Duration::minutes(5),
@@ -73,6 +75,7 @@ impl App {
             show_updated: false,
             show_intro: true,
             border: true,
+            pace: true,
             started: Instant::now(),
             intro_was_active: false,
             link: None,
@@ -88,6 +91,15 @@ impl App {
     /// Disables the startup "?" flash (used by single-shot rendering).
     pub fn without_intro(mut self) -> Self {
         self.show_intro = false;
+        self
+    }
+
+    /// Leaves the pace tick off the bars, now and after every refresh.
+    pub fn without_pace(mut self) -> Self {
+        self.pace = false;
+        for gauge in &mut self.views.windows {
+            gauge.pace = None;
+        }
         self
     }
 
@@ -218,7 +230,7 @@ impl App {
         };
         let status = crate::cache::fetch(ttl);
         self.last_refresh = fetched_at(&status);
-        self.views = crate::views::build(&status);
+        self.views = crate::views::build(&status, self.pace);
         self.incidents = crate::cache::fetch_incidents(ttl);
     }
 
@@ -1025,6 +1037,13 @@ mod tests {
         assert_eq!(buf[(tick(3) - 1, 3)].fg, Color::Yellow);
         assert_eq!(buf[(tick(2), 2)].fg, Color::DarkGray);
         assert_eq!(buf[(tick(2) + 1, 2)].fg, Color::DarkGray);
+
+        // --no-pace: no tick on any bar.
+        let mut app = App::new(usage_api::parse(&sample()), None)
+            .without_intro()
+            .without_pace();
+        terminal.draw(|f| app.draw(f)).unwrap();
+        assert!(!format!("{}", terminal.backend()).contains('\u{254b}'));
 
         // A window with no pace (not started) has no tick.
         let body = r#"{"limits":[{"kind":"session","group":"session","percent":0,

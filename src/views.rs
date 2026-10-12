@@ -91,12 +91,21 @@ pub struct Views {
     pub error: Option<String>,
 }
 
-pub fn build(status: &Result<UsageStatus, String>) -> Views {
+/// The gauge rows for a fetch result; `pace` false leaves every row's pace
+/// unset, so no tick is drawn.
+pub fn build(status: &Result<UsageStatus, String>, pace: bool) -> Views {
     match status {
         Ok(s) => {
             let now = Local::now();
             Views {
-                windows: s.windows.iter().map(|w| gauge(w, now)).collect(),
+                windows: s
+                    .windows
+                    .iter()
+                    .map(|w| GaugeView {
+                        pace: if pace { self::pace(w, now) } else { None },
+                        ..gauge(w, now)
+                    })
+                    .collect(),
                 error: None,
             }
         }
@@ -251,6 +260,17 @@ mod tests {
         assert!(!ahead_of_pace(&fresh, now));
         // Unknown pace is never "ahead".
         assert!(!ahead_of_pace(&window("session", None), now));
+    }
+
+    #[test]
+    fn build_leaves_the_pace_out_when_told_to() {
+        let now = Local::now();
+        let status = Ok(UsageStatus {
+            windows: vec![timed(62.0, Duration::hours(5), Duration::minutes(150), now)],
+            fetched_at: now,
+        });
+        assert!(build(&status, true).windows[0].pace.is_some());
+        assert!(build(&status, false).windows[0].pace.is_none());
     }
 
     #[test]

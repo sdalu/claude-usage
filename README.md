@@ -62,7 +62,8 @@ fill short of it is a window that lasts; a fill past it runs out before the
 reset if use keeps up — above, the Sonnet week has used 62% with 57% of the
 week gone. The window's length is read off its kind (5 hours for the session,
 7 days for a weekly one), so a window of a kind not yet seen, the spend
-window, and a window not started yet carry no mark.
+window, and a window not started yet carry no mark. The tick takes the colour
+of the stretch of bar it sits on. `--no-pace` leaves it off.
 
 When the terminal is too narrow for the full labels, they shorten in steps —
 first the word `resets` is dropped (`resets in 1h 20m` → `in 1h 20m`), then
@@ -111,6 +112,7 @@ cargo run --release -- --polybar     # print one status-bar line, then exit
 cargo run --release -- --polybar --interval 300   # ... or a line every 5 min
 cargo run --release -- --json        # print the windows as JSON, then exit
 cargo run --release -- --no-incidents # any mode, without the status-page check
+cargo run --release -- --no-pace     # any mode, without the pace tick or arrow
 cargo run --release -- --write-back  # also refresh an expired token in-place
 cargo run --release -- --check-rotation  # check if the refresh token rotates
 ```
@@ -175,7 +177,7 @@ face, so it stands out without extra width.
 A `↑` after a percentage (`Sonnet 62%↑`) marks a window running **ahead of its
 pace** — the fill past the TUI's `╋`, so at that rate it runs out before it
 resets. It is not judged in the first tenth of a window, where any use at all
-would read as far ahead.
+would read as far ahead. `--no-pace` leaves it off.
 
 An open incident on the status page puts a `⚠` **in front** of the line,
 coloured by the incident's impact — critical colour for `major`/`critical`,
@@ -445,7 +447,8 @@ claude-usage --check-rotation   # reports the verdict
 
 `pace` is the percent an even rate of use would have reached by now (`null`
 for a window not started or of unknown length), and `ahead_of_pace` is the
-polybar `↑`: used past that pace, judged from a tenth of the window on.
+polybar `↑`: used past that pace, judged from a tenth of the window on. Both
+are there whatever `--pace`/`--no-pace` says, since they are data.
 
 `incidents` lists the status page's unresolved incidents, worst first: `[]`
 when it is all clear, `null` when the page was not checked (`--no-incidents`)

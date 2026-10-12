@@ -133,6 +133,9 @@ pub struct Options {
     /// Command the incident marker's click runs, with the incident's URL
     /// appended. Empty for a marker that is not clickable.
     pub opener: String,
+    /// Mark a window running ahead of its pace with an arrow (`--no-pace`
+    /// turns it off).
+    pub pace: bool,
 }
 
 impl Default for Options {
@@ -142,6 +145,7 @@ impl Default for Options {
             bold_font: DEFAULT_BOLD_FONT,
             palette: Palette::default(),
             opener: DEFAULT_OPENER.to_string(),
+            pace: true,
         }
     }
 }
@@ -253,7 +257,7 @@ fn emit(line: &str) -> std::io::Result<()> {
 fn segment(window: &LimitWindow, opts: &Options) -> String {
     let percent = window.percent.round() as i64;
     let ratio = (window.percent / 100.0).clamp(0.0, 1.0);
-    let ahead = if ahead_of_pace(window, chrono::Local::now()) {
+    let ahead = if opts.pace && ahead_of_pace(window, chrono::Local::now()) {
         AHEAD
     } else {
         ""
@@ -432,6 +436,12 @@ mod tests {
         // Five minutes in: too early to judge, however much is used.
         let early = render(&usage_api::parse(&paced(40, 295)), &plain);
         assert_eq!(early, "5h 40%");
+        // --no-pace: never an arrow, however far ahead.
+        let off = Options {
+            pace: false,
+            ..plain
+        };
+        assert_eq!(render(&usage_api::parse(&paced(62, 150)), &off), "5h 62%");
         // The arrow is inside the colour, so it takes the window's severity.
         let coloured = render(&usage_api::parse(&paced(62, 150)), &Options::default());
         assert!(coloured.contains("62%\u{2191}%{F-}"), "{coloured}");

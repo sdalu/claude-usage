@@ -17,7 +17,8 @@ mod views;
 
 const USAGE: &str = "\
 Usage: claude-usage [-1 [--no-border]] [--polybar [options]] [--json]
-                    [--no-incidents] [--write-back] [--check-rotation] [--help]
+                    [--no-pace] [--no-incidents] [--write-back]
+                    [--check-rotation] [--help]
 
 A live monitor of your Claude plan usage windows (percent of allowance used),
 fetched from https://api.anthropic.com/api/oauth/usage using the OAuth token in
@@ -37,6 +38,11 @@ Options:
                reuse another instance's result if it is younger than N
                seconds (default: just under --interval, or 240s for a
                one-shot --polybar; other modes fetch fresh)
+  --pace, --no-pace
+               mark each window's pace, where an even rate of use would have
+               the bar by now: a tick on the monitor's bars, an arrow after a
+               polybar percentage that is ahead of it (default --pace; the
+               last one given wins). --json carries the pace either way.
   --no-incidents
                do not consult the status page: no incident marker, and no
                request to status.claude.com
@@ -92,6 +98,7 @@ struct Config {
     cache_ttl: Option<u64>,
     cache: bool,
     incidents: bool,
+    pace: bool,
     write_back: bool,
 }
 
@@ -132,6 +139,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Parsed, Refusal>
     let mut config = Config {
         cache: true,
         incidents: true,
+        pace: true,
         ..Config::default()
     };
     // Set by any option that only means something for --polybar, so using one
@@ -203,6 +211,8 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Parsed, Refusal>
             }
             "--no-cache" => config.cache = false,
             "--no-incidents" => config.incidents = false,
+            "--pace" => config.pace = true,
+            "--no-pace" => config.pace = false,
             "--write-back" => config.write_back = true,
             // Standalone diagnostic: runs and exits, ignoring the other flags.
             "--check-rotation" => return Ok(Parsed::CheckRotation),
@@ -254,8 +264,13 @@ fn real_main() -> i32 {
         cache_ttl,
         cache: cache_enabled,
         incidents: incidents_enabled,
+        pace,
         write_back,
     } = *config;
+    let polybar_opts = polybar::Options {
+        pace,
+        ..polybar_opts
+    };
 
     usage_api::set_write_back(write_back);
     cache::set_enabled(cache_enabled);
@@ -323,6 +338,9 @@ fn real_main() -> i32 {
         if no_border {
             app = app.without_border();
         }
+        if !pace {
+            app = app.without_pace();
+        }
         return match app.render_once() {
             Ok(()) => 0,
             Err(e) => {
@@ -332,7 +350,10 @@ fn real_main() -> i32 {
         };
     }
 
-    let app = tui::App::new(status, plan).with_incidents(incidents);
+    let mut app = tui::App::new(status, plan).with_incidents(incidents);
+    if !pace {
+        app = app.without_pace();
+    }
     let mut terminal = ratatui::init();
     let result = app.run(&mut terminal);
     ratatui::restore();
@@ -434,6 +455,26 @@ mod tests {
         assert!(config(&["--write-back"]).write_back);
         assert!(!config(&["--no-cache"]).cache);
         assert!(!config(&["--no-incidents"]).incidents);
+    }
+
+    #[test]
+    fn pace_is_on_unless_turned_off_and_the_last_flag_wins() {
+        assert!(config(&[]).pace);
+        assert!(!config(&["--no-pace"]).pace);
+        assert!(config(&["--pace"]).pace);
+        assert!(config(&["--no-pace", "--pace"]).pace);
+        assert!(!config(&["--pace", "--no-pace"]).pace);
+        // Valid in every mode, not a polybar-only option.
+        for mode in [
+            &["--json"][..],
+            &["-1"],
+            &["--polybar"],
+            &["--polybar", "--interval", "60"],
+        ] {
+            let mut args = mode.to_vec();
+            args.push("--no-pace");
+            assert!(!config(&args).pace, "{args:?}");
+        }
     }
 
     #[test]
