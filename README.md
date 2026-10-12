@@ -104,7 +104,6 @@ cargo run --release -- --json        # print the windows as JSON, then exit
 cargo run --release -- --no-incidents # any mode, without the status-page check
 cargo run --release -- --write-back  # also refresh an expired token in-place
 cargo run --release -- --check-rotation  # check if the refresh token rotates
-cargo test                           # run the unit tests
 ```
 
 `-1` is single-shot: it prints one coloured frame inline (no startup `?` flash,
@@ -113,10 +112,21 @@ no input loop) and exits, leaving the dashboard in your terminal. Add
 gauge rows, with no left margin and a single trailing space — handy for
 embedding the output.
 
-Install it onto your PATH:
+Install it onto your PATH, either through cargo or under a prefix:
 
 ```sh
-cargo install --path .
+cargo install --path .               # into ~/.cargo/bin
+make install                         # into /usr/local/bin (PREFIX, DESTDIR)
+```
+
+The Makefile wraps cargo and works under both GNU and BSD make; a bare `make`
+lists its targets and the variables in force:
+
+```sh
+make check      # preflight: the release agrees with cargo and the tags; rustfmt; clippy
+make tests      # the suite (cargo test); it never touches the network
+make version    # the release, from Cargo.toml
+make tag        # tag v<release>, after the preflight and the suite pass
 ```
 
 ### Keys
@@ -434,4 +444,14 @@ src/
 docs/
 ├── design.md      why it is shaped so: decisions, rejected alternatives
 └── usage-api.md   the reverse-engineered OAuth usage endpoints
+
+scripts/
+├── gitversion.sh  the git part of `make version-full` (+N.gHASH[.dirty])
+└── checktag.sh    the release in Cargo.toml agrees with the v* tags
+
+tests/
+└── check-version.sh  `make check-version`: Cargo.toml, cargo and the tags agree
+
+Makefile           cargo driver: check, build, tests, install, version, tag
+CHECKLIST.md       what closes a round of work
 ```

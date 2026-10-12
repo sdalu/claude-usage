@@ -12,10 +12,9 @@ a polybar line, or JSON.
 
 ## Gate
 
-```sh
-cargo test          # the whole suite; run it before and after a change
-cargo clippy --all-targets
-```
+Gate: `make tests` — the whole suite (`cargo test`); run it before and after
+a change. `make check` is the preflight beside it (release agreement, rustfmt,
+clippy). [CHECKLIST.md](CHECKLIST.md) is what closes a round.
 
 Tests never touch the network: the cache tests drive the fetch through a fake,
 everything else parses fixtures.
@@ -35,6 +34,6 @@ everything else parses fixtures.
   earn a 429.
 - **Seeing the incident marker when nothing is wrong:** point
   `XDG_CACHE_HOME` at a scratch directory holding a hand-written
-  `claude-usage/incidents.json` (`{"fetched_at": <ms>, "body": "<reply>"}`)
+  `$XDG_CACHE_HOME/claude-usage/incidents.json` (`{"fetched_at": <ms>, "body": "<reply>"}`)
   with a fresh stamp, and run with `--cache-ttl 600`. The real cache is then
   untouched.
