@@ -39,14 +39,16 @@ set -eu
 
 # CDPATH is emptied so that cd cannot land somewhere else entirely, and
 # given a value rather than left bare, which reads as a typo.
-top=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+top=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd -P)
 
 command -v git >/dev/null 2>&1 || exit 0
 
 # This tree's own repository, and not one it happens to be sitting
-# inside. --show-toplevel resolves symlinks the same way `pwd` above does,
-# so the two are comparable.
+# inside. Both sides physical (`pwd -P`, and the toplevel canonicalised
+# the same way): reached through a symlink, a logical path never equals
+# git's, and every tree would pass for a vendored one.
 gittop=$(git -C "$top" rev-parse --show-toplevel 2>/dev/null) || exit 0
+gittop=$(CDPATH='' cd -- "$gittop" && pwd -P) || exit 0
 if [ "$gittop" != "$top" ]; then
     exit 0
 fi
@@ -60,7 +62,7 @@ git -C "$top" rev-parse --verify -q HEAD >/dev/null 2>&1 || exit 0
 # An empty answer is not an early exit: a clone with no v* tag in reach
 # still knows its commit, and the case below reports that without a count.
 d=$(git -C "$top" describe --tags --long --dirty=.dirty \
-    --match 'v[0-9]*' 2>/dev/null) || d=''
+    --match 'v[0-9]*' --exclude 'v*[!0-9.]*' 2>/dev/null) || d=''
 
 # Taken off first, so what is left is the fixed three-field shape and the
 # fields can be cut off it without the suffix riding along.

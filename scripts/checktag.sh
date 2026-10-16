@@ -46,11 +46,14 @@ fi
 
 # CDPATH is emptied so that cd cannot land somewhere else entirely, and
 # given a value rather than left bare, which reads as a typo.
-top=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+top=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd -P)
 
 command -v git >/dev/null 2>&1 || exit 0
 
+# Both sides physical, as in gitversion.sh: through a symlink a logical
+# path never equals git's.
 gittop=$(git -C "$top" rev-parse --show-toplevel 2>/dev/null) || exit 0
+gittop=$(CDPATH='' cd -- "$gittop" && pwd -P) || exit 0
 if [ "$gittop" != "$top" ]; then
     exit 0
 fi
@@ -59,7 +62,7 @@ git -C "$top" rev-parse --verify -q HEAD >/dev/null 2>&1 || exit 0
 # --long so that the commit count is always there to read, .dirty so that
 # an in-progress bump can be told from a release.
 d=$(git -C "$top" describe --tags --long --dirty=.dirty \
-    --match 'v[0-9]*' 2>/dev/null) || d=''
+    --match 'v[0-9]*' --exclude 'v*[!0-9.]*' 2>/dev/null) || d=''
 if [ -z "$d" ]; then
     exit 0
 fi
